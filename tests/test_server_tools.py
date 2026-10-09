@@ -238,6 +238,6 @@ class ServerToolTests(ConfigDirectoryTestCase):
 
     async def test_tool_catalog(self):
         names = {tool.name for tool in await server.mcp.list_tools()}
-        self.assertTrue({"mock_shop_rank_services", "mock_shop_get_agent_config", "mock_shop_configure_agent"} <= names)
-        self.assertEqual(len(names), 38)
+        self.assertTrue({"mock_shop_rank_services", "mock_shop_get_agent_config", "mock_shop_configure_agent", "mock_shop_sync_spending_policy"} <= names)
+        self.assertEqual(len(names), 39)
         self.assertIn("mock_shop_rank_services", server.mcp.instructions)
