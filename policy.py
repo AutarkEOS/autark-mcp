@@ -3,24 +3,26 @@
 The model proposes a purchase; this code approves or rejects it from the local
 agent config. Anything that cannot be verified is rejected.
 
-Scope: this guards purchases made through this MCP server. A client that calls
-the marketplace REST API directly is not covered.
+This is the agent-side check. The marketplace enforces its own account policy
+(PUT /api/agent/spending-policy) inside every paying transaction, so a client
+that skips this server is still limited once that policy is set.
 """
 
 import hashlib
 import json
-from datetime import datetime, timezone
+import os
+import tempfile
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Awaitable, Callable
 from urllib.parse import quote as url_quote
 
-from agent_config import AgentConfigError, append_audit, config_path, load_config
+from agent_config import AgentConfigError, append_audit, audit_path, config_path, load_config
 
 LEDGER_PAGE_SIZE = 100
 MAX_LEDGER_PAGES = 50
-
-# Idempotency key -> fingerprint of the body it was approved for. A retry after a
-# timeout must not be rejected just because the first attempt already spent the budget.
-_approved: dict[str, str] = {}
+# Long enough to cover any retry of a timed-out payment, short enough to keep the file small.
+APPROVAL_TTL = timedelta(hours=48)
 
 
 class PolicyRejection(Exception):
@@ -30,8 +32,59 @@ class PolicyRejection(Exception):
         self.details = details or {}
 
 
+def approvals_path() -> Path:
+    """Idempotency key -> fingerprint of the body it was approved for, kept next to the decision log.
+
+    A retry after a timeout, even after a server restart, must not be rejected just
+    because the first attempt already used the budget.
+    """
+    return audit_path().parent / "approvals.json"
+
+
+def _load_approvals() -> dict[str, dict[str, str]]:
+    try:
+        data = json.loads(approvals_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        # Unknown approvals only mean a retry is checked again: the safe direction.
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _remember_approval(key: str, print_: str) -> None:
+    now = datetime.now(timezone.utc)
+    approvals = {}
+    for existing, entry in _load_approvals().items():
+        try:
+            if isinstance(entry, dict) and now - datetime.fromisoformat(entry["at"]) < APPROVAL_TTL:
+                approvals[existing] = entry
+        except (KeyError, TypeError, ValueError):
+            continue
+    approvals[key] = {"fingerprint": print_, "at": now.isoformat()}
+    path = approvals_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle, temporary = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8", newline="\n") as file:
+            json.dump(approvals, file)
+        os.replace(temporary, path)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
+
+
+def _was_approved(key: str, print_: str) -> bool:
+    entry = _load_approvals().get(key)
+    return isinstance(entry, dict) and entry.get("fingerprint") == print_
+
+
 def reset_approvals() -> None:
-    _approved.clear()
+    try:
+        approvals_path().unlink()
+    except OSError:
+        pass
 
 
 def fingerprint(action: str, body: dict[str, Any]) -> str:
@@ -122,7 +175,7 @@ async def authorize(
     spending, print_ = config["spending"], fingerprint(action, body)
     record: dict[str, Any] = {"type": "policy", "action": action, "idempotency_key": idempotency_key, "limits": spending}
     try:
-        if _approved.get(idempotency_key) == print_:
+        if _was_approved(idempotency_key, print_):
             record.update(approved=True, status="retry_of_approved_request")
         else:
             try:
@@ -164,10 +217,10 @@ async def authorize(
 
     try:
         append_audit(record)
+        _remember_approval(idempotency_key, print_)
     except OSError as error:
         raise PolicyRejection(f"The decision could not be recorded, so spending is blocked: {error.strerror or error}",
                               {**record, "approved": False, "status": "rejected"}) from None
-    _approved[idempotency_key] = print_
     return record
 
 
