@@ -57,6 +57,8 @@ class ConfigDirectoryTestCase(unittest.IsolatedAsyncioTestCase):
     """Points the agent config and decision log at a temporary directory."""
 
     def setUp(self) -> None:
+        import policy
+
         self._directory = tempfile.TemporaryDirectory()
         self.addCleanup(self._directory.cleanup)
         self.directory = Path(self._directory.name)
@@ -74,6 +76,8 @@ class ConfigDirectoryTestCase(unittest.IsolatedAsyncioTestCase):
                     os.environ[name] = value
 
         self.addCleanup(restore)
+        policy.reset_approvals()
+        self.addCleanup(policy.reset_approvals)
 
     def write_config(self, **fields: Any) -> None:
         self.config_file.write_text(json.dumps(fields), encoding="utf-8")
