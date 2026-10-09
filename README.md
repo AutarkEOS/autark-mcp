@@ -44,10 +44,67 @@ Quick self-check:
 
 `agent_1`, `agent_2`, and `agent_3` (`password123`) exist only after `bash scripts/start.sh --initial-seed`. That reset deletes business data, so a normal start does not create them. A migrated database with no users will make those env credentials return 401. Register an agent, or point the env vars at an account that exists. Demo seed agents also have no Solana keys. A newly registered agent has a keypair but no Devnet SOL, so purchase and compute funding fail until that address is funded.
 
+## Agent config
+
+The agent is configured once and then follows that config: which offers it prefers and how much it may spend. The config is a local JSON file, `~/.autark/agent-config.json`. It never leaves this machine and holds no credentials.
+
+| Variable | Default |
+| --- | --- |
+| `AUTARK_AGENT_CONFIG` | `~/.autark/agent-config.json` |
+| `AUTARK_DECISION_LOG` | `decisions.jsonl` next to the config |
+
+```json
+{
+  "version": 1,
+  "purpose": "Buy fruit for a kitchen, cheapest reliable supplier",
+  "purchase_mode": "ask",
+  "spending": {
+    "max_per_transaction_minor": 500,
+    "daily_budget_minor": 2000,
+    "allowed_kinds": ["product", "api-usage"]
+  },
+  "preferences": {
+    "priorities": ["quality", "reliability", "price"],
+    "limits": { "max_price_minor": 300, "min_rating": 3 },
+    "risk_tolerance": "low"
+  }
+}
+```
+
+Every field is optional. `null` or a missing spending limit means no limit. `preferences` takes the same fields as `POST /api/services/rank` (see `mock-servivce/API.md`, "Ranking ofert") and is validated by the marketplace's own `backend/services/ranking.py`.
+
+`mock_shop_configure_agent` creates the file on first use. After that the model may change `purpose` and `preferences` and may **tighten** spending, but it cannot raise or remove a limit, widen `allowed_kinds`, or switch `purchase_mode` from `ask` to `auto`. Those changes are a human edit of the file. `purchase_mode` is guidance for the model; the spending limits are what the code enforces.
+
+Without a config file nothing is limited and ranking uses the `balanced` profile. A file that exists but cannot be parsed blocks every spending tool until it is fixed.
+
+### Spending policy
+
+`mock_shop_purchase`, `mock_shop_checkout_cart` and `mock_shop_fund_compute` run `policy.py` before any request that can move funds:
+
+1. Price the request from the live catalog or cart. The model never supplies a price.
+2. Reject offer kinds outside `allowed_kinds`.
+3. Reject a total above `max_per_transaction_minor`.
+4. Reject when today's debits in the wallet ledger (UTC day) plus this total exceed `daily_budget_minor`.
+
+Anything that cannot be verified is a rejection: an unreadable price, ledger or config, a cart at another revision, or a decision that cannot be written to the log. A rejected call returns `error`, `policy` and `"Nothing was spent"`; no payment request is sent. A retry with the same `idempotency_key` and the same body is let through without counting the budget twice.
+
+Limits of this guard:
+
+- It covers this MCP server only. A client that calls the marketplace REST API directly is not limited.
+- The price can change between the quote and the payment; the marketplace charges its current price. Paid responses report `policy.quoted_total_minor` next to `policy.charged_total_minor`.
+- Approved retries are remembered in memory. After a server restart, a checkout retry is priced again; check `mock_shop_list_purchases` before retrying.
+
+### Decision log
+
+Each ranking, policy decision and config change is appended to `decisions.jsonl` as one JSON object with a UTC timestamp. Passwords and session tokens are never written.
+
 ## Tools
 
 | Tool | API |
 | --- | --- |
+| `mock_shop_get_agent_config` | local file, no API call |
+| `mock_shop_configure_agent` | local file, no API call |
+| `mock_shop_rank_services` | `POST /api/services/rank` with the saved preferences |
 | `mock_shop_health` | `GET /api/health` |
 | `mock_shop_list_services` | `GET /api/services` |
 | `mock_shop_get_service` | `GET /api/services/{id}` |
@@ -86,4 +143,18 @@ Quick self-check:
 
 Writes that accept `idempotency_key` generate one when it is omitted and return it. Reuse that key with the same body after a timeout. A new key is a new payment. Compute funding `http_status` 202 means the transfer is not settled yet; retry the same key and amount.
 
+`mock_shop_rank_services` merges per-call `preferences` over the saved ones: naming `weights`, `priorities` or `profile` replaces the saved weighting, while `limits` and `expectations` are merged key by key. `max_per_transaction_minor` is also applied as a price filter (`limit // quantity`), and each result carries `allowed_by_spending_policy`. Reliability and latency are labelled `simulated` until the marketplace has measured them; the tool's `warnings` say when that is the case.
+
 Vendor publishing, legacy `/execute`, and `/auth/registered-agents` are not exposed.
+
+## Tests
+
+```bash
+.venv/bin/python -E -m unittest discover -s tests
+```
+
+```powershell
+.\.venv\Scripts\python.exe -E -m unittest discover -s tests
+```
+
+The tests use a scripted marketplace session and a temporary config directory. They need no running stack and make no payments.
