@@ -86,13 +86,19 @@ Without a config file nothing is limited and ranking uses the `balanced` profile
 3. Reject a total above `max_per_transaction_minor`.
 4. Reject when today's debits in the wallet ledger (UTC day) plus this total exceed `daily_budget_minor`.
 
-Anything that cannot be verified is a rejection: an unreadable price, ledger or config, a cart at another revision, or a decision that cannot be written to the log. A rejected call returns `error`, `policy` and `"Nothing was spent"`; no payment request is sent. A retry with the same `idempotency_key` and the same body is let through without counting the budget twice.
+Anything that cannot be verified is a rejection: an unreadable price, ledger or config, a cart at another revision, or a decision that cannot be written to the log. A rejected call returns `error`, `policy` and `"Nothing was spent"`; no payment request is sent.
 
-Limits of this guard:
+A retry with the same `idempotency_key` and the same body is let through without counting the budget twice. Approvals are stored in `approvals.json` next to the decision log for 48 hours, so this also holds after a server restart. A missing or damaged file only means the retry is checked again.
 
-- It covers this MCP server only. A client that calls the marketplace REST API directly is not limited.
-- The price can change between the quote and the payment; the marketplace charges its current price. Paid responses report `policy.quoted_total_minor` next to `policy.charged_total_minor`.
-- Approved retries are remembered in memory. After a server restart, a checkout retry is priced again; check `mock_shop_list_purchases` before retrying.
+The price can change between the quote and the payment; the marketplace charges its current price. Paid responses report `policy.quoted_total_minor` next to `policy.charged_total_minor`.
+
+### Marketplace account policy
+
+The same limits are also enforced by the marketplace itself (`GET`/`PUT /api/agent/spending-policy`, see `mock-servivce/API.md`), inside every paying transaction. A client that skips this server is still limited, and two parallel orders cannot both fit one budget.
+
+- `mock_shop_configure_agent` copies the limits to the marketplace whenever it sets or tightens them. The result has `marketplace_sync.status`: `synced`, `not_signed_in`, `marketplace_stricter` (the marketplace keeps tighter limits) or `failed`. A failed sync never blocks the local config.
+- The marketplace only accepts loosening with the account owner's `current_password`. After a human loosens the local file, `mock_shop_sync_spending_policy` pushes it. It sends the password only when this server was started with `MOCK_SHOP_USERNAME`/`MOCK_SHOP_PASSWORD` of the signed-in account; that password comes from the human's MCP config and never passes through the model. Otherwise the marketplace stays stricter.
+- `mock_shop_get_agent_config` returns `marketplace_policy` with today's spend next to the local config.
 
 ### Decision log
 
@@ -102,8 +108,9 @@ Each ranking, policy decision and config change is appended to `decisions.jsonl`
 
 | Tool | API |
 | --- | --- |
-| `mock_shop_get_agent_config` | local file, no API call |
-| `mock_shop_configure_agent` | local file, no API call |
+| `mock_shop_get_agent_config` | local file and `GET /api/agent/spending-policy` |
+| `mock_shop_configure_agent` | local file, then `PUT /api/agent/spending-policy` when limits change |
+| `mock_shop_sync_spending_policy` | `PUT /api/agent/spending-policy` from the local file |
 | `mock_shop_rank_services` | `POST /api/services/rank` with the saved preferences |
 | `mock_shop_health` | `GET /api/health` |
 | `mock_shop_list_services` | `GET /api/services` |
@@ -143,7 +150,7 @@ Each ranking, policy decision and config change is appended to `decisions.jsonl`
 
 Writes that accept `idempotency_key` generate one when it is omitted and return it. Reuse that key with the same body after a timeout. A new key is a new payment. Compute funding `http_status` 202 means the transfer is not settled yet; retry the same key and amount.
 
-`mock_shop_rank_services` merges per-call `preferences` over the saved ones: naming `weights`, `priorities` or `profile` replaces the saved weighting, while `limits` and `expectations` are merged key by key. `max_per_transaction_minor` is also applied as a price filter (`limit // quantity`), and each result carries `allowed_by_spending_policy`. Reliability and latency are labelled `simulated` until the marketplace has measured them; the tool's `warnings` say when that is the case.
+`mock_shop_rank_services` merges per-call `preferences` over the saved ones: naming `weights`, `priorities` or `profile` replaces the saved weighting, while `limits` and `expectations` are merged key by key. `max_per_transaction_minor` is also applied as a price filter (`limit // quantity`), and each result carries `allowed_by_spending_policy`. Reliability and latency of API and compute offers are labelled `simulated` until the marketplace has measured them; for products they are `not_applicable` and their weight goes to the other criteria. The tool's `warnings` say when either is the case.
 
 Vendor publishing, legacy `/execute`, and `/auth/registered-agents` are not exposed.
 
@@ -158,3 +165,21 @@ Vendor publishing, legacy `/execute`, and `/auth/registered-agents` are not expo
 ```
 
 The tests use a scripted marketplace session and a temporary config directory. They need no running stack and make no payments.
+
+### End-to-end
+
+`e2e/run.py` starts the real backend on a throwaway database `autark_e2e_<random>` and drives this server over stdio. It needs the PostgreSQL container from `mock-servivce` running and both venvs installed. The backend runs with `mock-servivce/backend/.venv` (override with `AUTARK_BACKEND_PYTHON`).
+
+```bash
+.venv/bin/python -E e2e/run.py
+```
+
+```powershell
+.\.venv\Scripts\python.exe -E e2e\run.py
+```
+
+- `decision`: first-run config, ranking under two profiles, measured signals, policy rejections. Nothing is bought.
+- `payment`: register, top up, rank, buy, retry, budget and checkout blocks, a retry after a server restart, a direct REST purchase blocked by the marketplace, and the ERC-8004 feedback export. Uses the backend's `AUTARK_DB_TESTS` payment path: balance, ledger and receipts are real, the on-chain transfer is replaced by a mock signature.
+- `chain` (`--scenario chain`): one real Solana Devnet purchase of 0.05 SOL. It needs Devnet SOL on the agent address it prints. When the faucet refuses, fund that address and rerun with `--database <name> --keep-database`.
+
+The database is dropped afterwards unless `--keep-database` is given.
