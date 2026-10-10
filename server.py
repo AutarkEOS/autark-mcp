@@ -62,6 +62,10 @@ SAFE_WRITE = ToolAnnotations(
 _ID = r"^[a-z0-9_-]{1,64}$"
 _UUID = r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
 
+# Seed from the most recent mock_shop_rank_services call in this MCP session.
+# Attached to the next purchase / checkout so the ranking decision can be reproduced.
+_last_ranking_seed: str | None = None
+
 
 class LineItem(BaseModel):
     """One catalog line. vendor_id is an optional assertion, not a price."""
@@ -354,6 +358,9 @@ async def mock_shop_rank_services(
         "purchase_mode": (config or {}).get("purchase_mode"), "spending": spending or None}}
     if config is None:
         result["hint"] = "No agent config exists, so the balanced profile was used. Set preferences once with mock_shop_configure_agent."
+    # Remember the seed so the next purchase / checkout can reference this ranking.
+    global _last_ranking_seed
+    _last_ranking_seed = decision.get("request", {}).get("seed")
     try:
         append_audit({"type": "ranking", "decision": decision})
     except OSError as error:
@@ -590,12 +597,15 @@ async def mock_shop_checkout_cart(
     ),
 ) -> str:
     """Pay for the current cart on Solana and clear it in SQL. Reuse the returned idempotency_key with the same revision after a timeout. A new key is a new payment. Seeded agents without Solana keys fail before payment. Refused without spending when the cart total breaks the agent config's spending limits."""
+    body: dict[str, Any] = {"revision": revision}
+    if _last_ranking_seed is not None:
+        body["ranking_seed"] = _last_ranking_seed
     return await _spend(
         "POST",
         "/api/cart/checkout",
         action="checkout_cart",
         key=idempotency_key,
-        json_body={"revision": revision},
+        json_body=body,
         quote=lambda: policy.quote_cart(session(), revision),
     )
 
@@ -611,12 +621,15 @@ async def mock_shop_purchase(
 ) -> str:
     """Buy offers directly. This spends Devnet SOL (1 minor = 0.01 SOL plus gas) and then records SQL. Seeded demo agents have no keys and fail with 400. Keep the returned idempotency_key if the response is lost. Refused without spending when the total breaks the agent config's spending limits."""
     lines = _lines(items)
+    body: dict[str, Any] = {"items": lines}
+    if _last_ranking_seed is not None:
+        body["ranking_seed"] = _last_ranking_seed
     return await _spend(
         "POST",
         "/api/purchases",
         action="purchase",
         key=idempotency_key,
-        json_body={"items": lines},
+        json_body=body,
         quote=lambda: policy.quote_items(session(), lines),
     )
 
@@ -852,6 +865,95 @@ async def mock_shop_get_compute_run(
     """Read one owned run. Set include_result only after unpaid_minor is 0. Running or failed runs have no result."""
     suffix = "/result" if include_result else ""
     return await _authed("GET", f"/api/compute/runs/{_path(run_id)}{suffix}")
+
+
+@mcp.tool(
+    name="mock_shop_fetch_x402",
+    title="Fetch x402-protected resource",
+    annotations=WRITE,
+)
+async def mock_shop_fetch_x402(
+    url: str = Field(..., description="URL of the x402-protected resource (https required in production; http allowed for local dev)."),
+    method: str = Field(default="GET", description="HTTP method: GET or POST.", pattern="^(GET|POST)$"),
+    arguments: dict[str, Any] | None = Field(default=None, description="Query parameters for GET, or JSON body for POST."),
+    max_payment_minor: int | None = Field(
+        default=None,
+        description="Maximum amount in minor units this request may pay. Falls back to the agent config per-transaction limit when omitted.",
+        ge=1,
+        le=2_147_483_647,
+    ),
+) -> str:
+    """Fetch a URL that may require an x402 payment (402 Payment Required + PAYMENT-REQUIRED header).
+
+    Flow:
+    1. Issues the request; if 200 returns the body directly.
+    2. On 402, parses the PAYMENT-REQUIRED header (x402 V2 base64 JSON).
+    3. Selects the first requirement the agent can pay: exact scheme, Solana Devnet, within the spending limit.
+    4. Signs a Solana SOL transfer (1 minor = 0.01 SOL) and retries with PAYMENT-SIGNATURE.
+    5. Returns the response body together with payment metadata.
+
+    The spending policy (allowed_kinds, per-transaction limit, daily budget) is checked before signing.
+    Only the exact/solana-devnet scheme is supported. Mainnet and USDC are not implemented.
+    """
+    import os
+    from x402_client import X402Error, X402PolicyRejection, X402RequiresPayment, fetch_with_x402
+
+    # Resolve spending limit.
+    try:
+        config = load_config()
+    except AgentConfigError as error:
+        return _json({"error": f"Agent config unreadable, x402 fetch blocked: {error}"})
+
+    ceiling = None
+    if config:
+        ceiling = config.get("spending", {}).get("max_per_transaction_minor")
+    if max_payment_minor is not None:
+        ceiling = min(max_payment_minor, ceiling) if ceiling is not None else max_payment_minor
+
+    # Retrieve the agent's encrypted private key from the marketplace.
+    try:
+        _status, me = await session().request("GET", "/api/auth/me", auth=True)
+        user_id = me.get("user", {}).get("id")
+        if not user_id:
+            return _json({"error": "Not signed in. Call mock_shop_login first."})
+        _status, wallet = await session().request("GET", "/api/wallet", auth=True)
+        encrypted_privkey = wallet.get("wallet", {}).get("solana_privkey_encrypted")
+        if not encrypted_privkey:
+            return _json({"error": "Agent Solana keypair is not initialized. Register a new agent to get a keypair."})
+    except Exception as error:  # noqa: BLE001
+        return _error(error)
+
+    try:
+        result = await fetch_with_x402(
+            url=url,
+            method=method,
+            arguments=arguments or {},
+            encrypted_privkey=encrypted_privkey,
+            max_payment_minor=ceiling,
+            allowed_networks=None,  # accept any Solana network (devnet / mainnet)
+        )
+    except X402PolicyRejection as exc:
+        return _json({"error": str(exc), "hint": "Raise the per-transaction limit in mock_shop_configure_agent."})
+    except X402RequiresPayment as exc:
+        return _json({"error": str(exc), "available_requirements": exc.requirements})
+    except X402Error as exc:
+        return _json({"error": f"x402 protocol error: {exc}"})
+    except Exception as exc:  # noqa: BLE001
+        return _error(exc)
+
+    # Log the decision.
+    try:
+        append_audit({
+            "type": "x402_fetch",
+            "url": url,
+            "paid": result["paid"],
+            "amount_paid": result["amount_paid"],
+            "requirement": result.get("requirement"),
+        })
+    except OSError:
+        pass
+
+    return _json(result)
 
 
 if __name__ == "__main__":
