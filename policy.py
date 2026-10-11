@@ -88,7 +88,11 @@ def reset_approvals() -> None:
 
 
 def fingerprint(action: str, body: dict[str, Any]) -> str:
-    return hashlib.sha256(json.dumps([action, body], sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    # ranking_seed is audit metadata attached by this process; it is not part of the
+    # paid basket. After a restart the in-memory seed is gone, so including it here
+    # would make a same-key retry look like a new spend.
+    commercial = {key: value for key, value in body.items() if key != "ranking_seed"}
+    return hashlib.sha256(json.dumps([action, commercial], sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
 async def quote_items(session: Any, lines: list[dict[str, Any]]) -> dict[str, Any]:
