@@ -138,8 +138,10 @@ async def payment(api_url: str, config_dir: Path, check: Checks) -> None:
     async def first_session(call):
         registered = await call("mock_shop_register", username=username, password=password)
         check("agent registered with a Solana keypair", isinstance(registered, dict) and registered["http_status"] == 201)
-        topup = await call("mock_shop_topup_wallet", amount_minor=1000)
-        check("wallet credited 1000 minor", topup["wallet"]["balance_minor"] == 1000, str(topup["wallet"]["balance_minor"]))
+        wallet = await call("mock_shop_get_wallet")
+        check("test payment path starts with 10.00 SOL mirrored, no airdrop",
+              wallet["wallet"]["balance_minor"] == 1000 and wallet["wallet"]["currency"] == "SOL",
+              str(wallet["wallet"].get("balance_minor")))
 
         configured = await call("mock_shop_configure_agent", purpose="E2E payer", max_per_transaction_minor=500, daily_budget_minor=600,
                                 allowed_kinds=["product", "api-usage"], preferences={"profile": "cheapest"})
@@ -226,9 +228,6 @@ async def chain(api_url: str, config_dir: Path, check: Checks) -> None:
         print(f"agent address: {pubkey}", flush=True)
         wallet = await call("mock_shop_get_wallet")
         sol = wallet["wallet"].get("solana_balance_sol") or 0
-        if sol < 0.06:
-            await call("mock_shop_topup_wallet", amount_minor=100)
-            sol = (await call("mock_shop_get_wallet"))["wallet"].get("solana_balance_sol") or 0
         check("agent wallet holds Devnet SOL", sol >= 0.06, f"{sol} SOL")
         if sol < 0.06:
             print(f"Fund {pubkey} with 0.1 Devnet SOL (https://faucet.solana.com), then rerun with --database and --keep-database.")
