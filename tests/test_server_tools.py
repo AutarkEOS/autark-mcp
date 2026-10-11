@@ -167,9 +167,7 @@ class ServerToolTests(ConfigDirectoryTestCase):
     async def test_non_spending_tools_are_not_gated(self):
         self.write_config(spending={"max_per_transaction_minor": 0, "daily_budget_minor": 0, "allowed_kinds": []})
         self.session.on("GET", "/api/services", {"services": []})
-        self.session.on("POST", "/api/wallet/topups", (201, {"topup": {"amount_minor": 50}}))
         self.assertEqual(await self.call("mock_shop_list_services"), {"services": []})
-        self.assertEqual((await self.call("mock_shop_topup_wallet", amount_minor=50))["http_status"], 201)
 
     # --- ranking tool -----------------------------------------------------
 

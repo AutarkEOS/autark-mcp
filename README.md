@@ -125,7 +125,6 @@ Each ranking, policy decision and config change is appended to `decisions.jsonl`
 | `mock_shop_logout` | `POST /api/auth/logout` |
 | `mock_shop_whoami` | `GET /api/auth/me` |
 | `mock_shop_get_wallet` | `GET /api/wallet` |
-| `mock_shop_topup_wallet` | `POST /api/wallet/topups` |
 | `mock_shop_list_wallet_transactions` | `GET /api/wallet/transactions` |
 | `mock_shop_get_cart` | `GET /api/cart` |
 | `mock_shop_set_cart` | `PUT /api/cart` |
@@ -179,7 +178,7 @@ The tests use a scripted marketplace session and a temporary config directory. T
 ```
 
 - `decision`: first-run config, ranking under two profiles, measured signals, policy rejections. Nothing is bought.
-- `payment`: register, top up, rank, buy, retry, budget and checkout blocks, a retry after a server restart, a direct REST purchase blocked by the marketplace, and the ERC-8004 feedback export. Uses the backend's `AUTARK_DB_TESTS` payment path: balance, ledger and receipts are real, the on-chain transfer is replaced by a mock signature.
-- `chain` (`--scenario chain`): one real Solana Devnet purchase of 0.05 SOL. It needs Devnet SOL on the agent address it prints. When the faucet refuses, fund that address and rerun with `--database <name> --keep-database`.
+- `payment`: register, rank, buy, retry, budget and checkout blocks, a retry after a server restart, a direct REST purchase blocked by the marketplace, and the ERC-8004 feedback export. Uses the backend's `AUTARK_DB_TESTS` payment path: no airdrop. The SQL mirror is set and the chain is replaced at the payment boundary. A newly registered agent starts with 1000 minor (10.00 SOL) of that mirror. Balance, ledger and receipts are real.
+- `chain` (`--scenario chain`): one real Solana Devnet purchase of 0.05 SOL. It needs real Devnet SOL on the agent address it prints and prints the faucet link (https://faucet.solana.com). It does not call a top-up. When the faucet refuses, fund that address and rerun with `--database <name> --keep-database`.
 
 The database is dropped afterwards unless `--keep-database` is given.

@@ -496,24 +496,6 @@ async def mock_shop_get_wallet() -> str:
     return await _authed("GET", "/api/wallet")
 
 
-@mcp.tool(name="mock_shop_topup_wallet", title="Top up wallet", annotations=WRITE)
-async def mock_shop_topup_wallet(
-    amount_minor: int = Field(..., description="SQL credit in minor units, at least 1. Does not guarantee a Devnet airdrop.", ge=1, le=2_147_483_647),
-    idempotency_key: str | None = Field(
-        default=None,
-        description="Retry key. Omit to generate one. Reuse it with the same amount after a timeout.",
-        max_length=128,
-    ),
-) -> str:
-    """Credit the agent SQL wallet and try a Devnet airdrop of at most 1 SOL. Replay does not airdrop again. The returned idempotency_key must be reused for a retry of this same amount."""
-    return await _write(
-        "POST",
-        "/api/wallet/topups",
-        key=idempotency_key,
-        json_body={"amount_minor": amount_minor},
-    )
-
-
 @mcp.tool(name="mock_shop_list_wallet_transactions", title="Wallet ledger", annotations=READ)
 async def mock_shop_list_wallet_transactions(
     limit: int | None = Field(default=None, description="Page size 1-100. Default 20.", ge=1, le=100),
