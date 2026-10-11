@@ -29,6 +29,22 @@ class PersistentApprovalTests(ConfigDirectoryTestCase):
         self.session.on("GET", "/api/wallet/transactions", ledger((now, -200)))
         self.assertEqual((await self.authorize())["status"], "retry_of_approved_request")
 
+    async def test_ranking_seed_does_not_change_the_retry_fingerprint(self):
+        lines = [{"product_id": "apple", "quantity": 2}]
+        await policy.authorize(
+            self.session, action="purchase", idempotency_key="order-1",
+            body={"items": lines, "ranking_seed": "pay"},
+            quote=lambda: policy.quote_items(self.session, lines),
+        )
+        now = datetime.now(timezone.utc).isoformat()
+        self.session.on("GET", "/api/wallet/transactions", ledger((now, -200)))
+        retry = await policy.authorize(
+            self.session, action="purchase", idempotency_key="order-1",
+            body={"items": lines},
+            quote=lambda: policy.quote_items(self.session, lines),
+        )
+        self.assertEqual(retry["status"], "retry_of_approved_request")
+
     async def test_old_approvals_are_pruned_and_a_damaged_file_means_checking_again(self):
         stale = (datetime.now(timezone.utc) - timedelta(days=3)).isoformat()
         policy.approvals_path().write_text(json.dumps({"ancient": {"fingerprint": "x", "at": stale}, "junk": 5}), encoding="utf-8")
