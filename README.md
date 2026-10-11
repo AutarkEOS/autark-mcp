@@ -9,6 +9,23 @@ git clone https://github.com/AutarkEOS/Autark.git ../Autark
 bash ../Autark/mock-servivce/scripts/start.sh
 ```
 
+## Migrating from the monorepo
+
+This server used to be the `mock-mcp/` directory of the Autark repo. It is now this repo, with its history. The marketplace stays in Autark. To switch an existing setup:
+
+1. In your Autark checkout, pull `main` and delete the leftover `mock-mcp/` directory. Git no longer tracks it, but your old `.venv/` and `__pycache__/` remain there and show up as untracked.
+2. Clone this repo next to Autark, so both share a parent directory (`.../Autark` and `.../autark-mcp`), and create its venv as described in Setup below. The old venv cannot be moved.
+3. In your MCP client config, replace both paths: `.../Autark/mock-mcp/.venv/...` becomes `.../autark-mcp/.venv/...` and `.../Autark/mock-mcp/server.py` becomes `.../autark-mcp/server.py`. Restart the client.
+4. Your agent config and decision log in `~/.autark/` are untouched and keep working.
+
+What behaves differently:
+
+- **API URL.** The server no longer reads Autark's `mock-servivce/config`. It uses `http://127.0.0.1:500` unless `MOCK_SERVICE_API_URL` is set. If your `local.config.json` moves the backend to another host or port, set `MOCK_SERVICE_API_URL` in the client config.
+- **Preferences.** `mock_shop_configure_agent` needs a running backend to save `preferences`, because the marketplace now validates their values.
+- **End-to-end tests** look for Autark at `../Autark/mock-servivce`. Set `AUTARK_SERVICE_ROOT` if your checkout is elsewhere.
+
+Changes that touch both sides, such as a new API field and the tool that uses it, are now two pull requests: merge the Autark one first.
+
 ## Setup
 
 ```bash
