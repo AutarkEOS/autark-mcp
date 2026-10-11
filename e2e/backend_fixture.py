@@ -101,8 +101,54 @@ def create_database():
                 (entitlement, 'failed' if index == 0 else 'succeeded', (170 + index * 2) / 1000))
 
 
+def install_test_payments():
+    """SQL balance stands in for Devnet SOL. Nothing is signed or broadcast."""
+    from uuid import uuid4 as new_id
+
+    from backend.errors import ApiError
+    from backend.services import auth, solana_payments
+    from backend.services import wallet as wallet_service
+
+    def live_balance(pubkey):
+        with connect() as connection:
+            row = connection.execute('SELECT w.balance_minor FROM wallets w JOIN users u ON u.id=w.user_id '
+                                     'WHERE u.solana_pubkey=%s', (pubkey,)).fetchone()
+        if row is None:
+            return None, None, 'unavailable'
+        return row['balance_minor'], row['balance_minor'] / 100, 'chain'
+
+    def prepare_transfers(encrypted_key, transfers):
+        needed = sum(amount for _, amount in transfers)
+        with connect() as connection:
+            row = connection.execute('SELECT w.balance_minor FROM wallets w JOIN users u ON u.id=w.user_id '
+                                     'WHERE u.solana_privkey_encrypted=%s', (encrypted_key,)).fetchone()
+        balance = row['balance_minor'] if row else 0
+        if needed > balance:
+            raise ApiError(f'Insufficient Solana Devnet balance: this payment needs {needed / 100:.2f} SOL, '
+                           f'the mirrored wallet has {balance / 100:.2f} SOL. Nothing was sent.', 409)
+        return {'signed_transaction': b'e2e-test-payment', 'solana_tx_signature': 'e2e' + new_id().hex,
+                'last_valid_block_height': 1, 'wallet_balance_after_minor': balance - needed}
+
+    wallet_service.live_balance = live_balance
+    solana_payments.prepare_transfers = prepare_transfers
+    solana_payments.settle_transfer = lambda *_args, **_kwargs: solana_payments.CONFIRMED
+    real_register = auth.register_user
+
+    def register_user(body):
+        result = real_register(body)
+        user_id = (result.get('user') or {}).get('id')
+        if user_id:
+            with connect() as connection:
+                connection.execute('UPDATE wallets SET balance_minor=1000 WHERE user_id=%s', (user_id,))
+        return result
+
+    auth.register_user = register_user
+
+
 create_database()
 patch.object(database, 'connect_db', connect).start()
+if options.mode == 'test-payments':
+    install_test_payments()
 from backend.app import app  # noqa: E402
 from waitress import serve  # noqa: E402
 
