@@ -93,7 +93,7 @@ def _error(error: Exception) -> str:
         elif error.status == 401:
             hint = " Sign in with mock_shop_login, or set MOCK_SHOP_USERNAME and MOCK_SHOP_PASSWORD."
         elif error.status == 402:
-            hint = " Compute debt or an unpaid result is blocking this. Fund the same account, then retry the read; do not upload the script again."
+            hint = " A run recorded before credit-limited compute still owes money. Fund the same account, then retry the read; do not upload the script again."
         elif error.status == 403 and "spending policy" in error.message:
             hint = " Nothing was spent. The marketplace enforces this account's spending limits; only the account owner can raise them."
         elif error.status == 409:
@@ -815,7 +815,7 @@ async def mock_shop_run_compute(
         max_length=128,
     ),
 ) -> str:
-    """Upload Python and run it against prepaid credit. HTTP 201 can still be a failed or indebted run; read run.status, unpaid_minor, and result_available. A provider failure does not charge. Do not re-upload after an ambiguous timeout; retry the same key and source."""
+    """Upload Python and run it against prepaid credit. A run lasts at most as long as the credit covers (account.credit_covers_seconds) and never goes into debt. When time runs out the script is stopped: run.result.timed_out is true, run.result.message says "Time limit exceeded", and stdout/stderr hold the output up to that point. HTTP 201 can still be a failed run; read run_status. A provider failure does not charge. Do not re-upload after an ambiguous timeout; retry the same key and source."""
     if "\x00" in filename or not filename.lower().endswith(".py"):
         return _error(MockShopApiError(400, "filename must end in .py and must not contain NUL."))
     source_bytes = source.encode("utf-8")
@@ -838,7 +838,7 @@ async def mock_shop_run_compute(
             "idempotency_key": idem,
             "run_status": run.get("status"),
             "result_available": run.get("result_available"),
-            "unpaid_minor": run.get("unpaid_minor"),
+            "time_limit_exceeded": bool((run.get("result") or {}).get("timed_out")),
         })
     except Exception as error:  # noqa: BLE001
         return _error(error)
@@ -859,10 +859,10 @@ async def mock_shop_get_compute_run(
     run_id: str = Field(..., description="Run UUID.", pattern=_UUID),
     include_result: bool = Field(
         default=False,
-        description="Read the result endpoint. Unpaid debt returns 402; fund the account, then call this again. Do not rerun the script.",
+        description="Read the result endpoint. Do not rerun the script to get its output.",
     ),
 ) -> str:
-    """Read one owned run. Set include_result only after unpaid_minor is 0. Running or failed runs have no result."""
+    """Read one owned run. Completed runs, including ones stopped by the time limit, have a result. Running or failed runs have no result."""
     suffix = "/result" if include_result else ""
     return await _authed("GET", f"/api/compute/runs/{_path(run_id)}{suffix}")
 
