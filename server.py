@@ -33,7 +33,7 @@ from client import (
 mcp = MCPServer(
     "mock_shop_mcp",
     instructions=(
-        "Tools for the Autark mock marketplace (mock-servivce). "
+        "Tools for the Autark mock marketplace (AutarkEOS/Autark). "
         "Browse services and vendors, then act as an agent: wallet, cart, purchases, "
         "one-time API usages, and prepaid compute. "
         "Prices are integer minor units (1 minor = 0.01 SOL in this demo). "
@@ -244,6 +244,16 @@ async def _owner_password() -> str | None:
     return creds[1] if user.get("username") == creds[0].strip().lower() else None
 
 
+async def _check_preferences(preferences: dict[str, Any]) -> None:
+    """Let the marketplace validate preference values: it owns the ranking rules. Ranking reads nothing private."""
+    try:
+        await session().request("POST", "/api/services/rank", json_body={"preferences": preferences, "top_n": 1}, auth=False)
+    except MockShopApiError as error:
+        if error.status == 400:
+            raise AgentConfigError(error.message) from None
+        raise AgentConfigError(f"Could not validate preferences with the marketplace: {error.message}") from None
+
+
 async def _sync_spending(spending: dict[str, Any], *, owner_may_loosen: bool) -> dict[str, Any]:
     """Copy the local limits into the marketplace's account policy, which every payment enforces."""
     body = {name: spending[name] for name in SPENDING_FIELDS}
@@ -337,7 +347,10 @@ async def mock_shop_configure_agent(
         ("daily_budget_minor", daily_budget_minor), ("allowed_kinds", allowed_kinds), ("preferences", preferences)) if value is not None}
     try:
         current = load_config()
-        saved = save_config(apply_update(current, update))
+        updated = apply_update(current, update)
+        if "preferences" in update:
+            await _check_preferences(updated["preferences"])
+        saved = save_config(updated)
     except AgentConfigError as error:
         return f"Error: {error}"
     except OSError as error:

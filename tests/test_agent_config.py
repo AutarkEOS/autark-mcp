@@ -57,18 +57,18 @@ class AgentConfigTests(ConfigDirectoryTestCase):
             {"spending": {"daily_budget_minor": 2_147_483_648}}, {"spending": {"daily_budget_minor": "10"}},
             {"spending": {"allowed_kinds": "product"}}, {"spending": {"allowed_kinds": ["service"]}},
             {"spending": {"allowed_kinds": ["product", "product"]}},
-            {"preferences": {"profile": "best"}}, {"preferences": {"weights": {"price": -1}}}, {"preferences": []},
-            {"preferences": {"limits": {"max_price_minor": 0}}},
+            {"preferences": []}, {"preferences": "cheapest"}, {"preferences": {"surprise": 1}},
         ]
         for raw in invalid:
             with self.subTest(raw=raw), self.assertRaises(AgentConfigError):
                 validate_config(raw)
 
-    def test_preferences_use_the_marketplace_rules(self):
-        rules = agent_config.ranking_rules()
-        self.assertIn("quality_first", rules.PROFILES)
+    def test_preference_values_are_left_to_the_marketplace(self):
         valid = {"priorities": ["quality", "price"], "limits": {"min_rating": 4}, "risk_tolerance": "low"}
         self.assertEqual(validate_config({"preferences": valid})["preferences"], valid)
+        # Only the marketplace knows the profiles and ranges; it rejects these on the next ranking.
+        unchecked = {"profile": "best", "weights": {"price": -1}}
+        self.assertEqual(validate_config({"preferences": unchecked})["preferences"], unchecked)
 
 
 class TightenOnlyTests(ConfigDirectoryTestCase):
@@ -118,7 +118,7 @@ class TightenOnlyTests(ConfigDirectoryTestCase):
         self.assertEqual(changed["spending"], self.current["spending"])
 
     def test_invalid_updates_are_rejected(self):
-        for update in ({"spending": {}}, {"unknown": 1}, {"preferences": {"profile": "best"}}, {"max_per_transaction_minor": -5},
+        for update in ({"spending": {}}, {"unknown": 1}, {"preferences": {"surprise": 1}}, {"max_per_transaction_minor": -5},
                        {"allowed_kinds": ["service"]}, {"purchase_mode": "never"}):
             with self.subTest(update=update), self.assertRaises(AgentConfigError):
                 apply_update(self.current, update)

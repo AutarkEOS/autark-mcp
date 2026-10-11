@@ -107,6 +107,16 @@ def _select_requirement(
     return None
 
 
+def _agent_private_key(encrypted_privkey: str) -> bytes:
+    """Agent keys are encrypted with the marketplace's server-side key, which this process must
+    never hold, and the marketplace API never returns them. Signing needs a key the agent keeps
+    locally; that is not implemented yet."""
+    raise X402Error(
+        "Signing x402 payments needs an agent-held Solana keypair, which is not implemented. "
+        "The marketplace never shares its encrypted agent keys with this server."
+    )
+
+
 async def _sign_solana_payment(
     requirement: dict,
     encrypted_privkey: str,
@@ -127,23 +137,9 @@ async def _sign_solana_payment(
 
     from agent_config import AgentConfigError
 
-    # Decrypt the agent's private key.
-    try:
-        # Import decrypt function relative to this module's location.
-        import importlib.util, os, sys
-        settings_path = os.path.join(os.path.dirname(__file__), "settings.py")
-        spec = importlib.util.spec_from_file_location("mcp_settings", settings_path)
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        mock_root = mod.MOCK_SERVICE_ROOT
-        wallet_path = mock_root / "backend" / "services" / "solana_wallet.py"
-        wspec = importlib.util.spec_from_file_location("mock_service_wallet", wallet_path)
-        wmod = importlib.util.module_from_spec(wspec)
-        wspec.loader.exec_module(wmod)
-        privkey_bytes = wmod.decrypt_private_key(encrypted_privkey)
-    except Exception as exc:
-        raise X402Error(f"Could not decrypt agent Solana keypair: {exc}") from exc
+    import os
 
+    privkey_bytes = _agent_private_key(encrypted_privkey)
     sender_kp = Keypair.from_bytes(privkey_bytes)
     pay_to = requirement.get("payTo")
     if not pay_to:

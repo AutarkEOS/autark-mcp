@@ -1,12 +1,13 @@
 """Run the end-to-end scenarios against a throwaway backend.
 
-Needs the PostgreSQL container from mock-servivce running and both venvs installed.
+Needs a checkout of the Autark repo (see service_root.py), its PostgreSQL container
+running and both venvs installed.
 Run with the MCP venv:
 
     .venv/bin/python -E e2e/run.py                      # decision + payment
     .venv/bin/python -E e2e/run.py --scenario chain     # one real Devnet purchase
 
-The backend is started with mock-servivce/backend/.venv (override AUTARK_BACKEND_PYTHON)
+The backend is started with <Autark>/mock-servivce/backend/.venv (override AUTARK_BACKEND_PYTHON)
 on a new database autark_e2e_<random>, which is dropped afterwards unless --keep-database.
 No scenario touches the main database.
 """
@@ -25,8 +26,9 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 from scenarios import SCENARIOS, Checks  # noqa: E402
+from service_root import service_root  # noqa: E402
 
-BACKEND_ROOT = HERE.parents[1] / "mock-servivce" / "backend"
+BACKEND_ROOT = service_root() / "backend"
 READY_TIMEOUT_SECONDS = 180
 
 
@@ -37,7 +39,7 @@ def backend_python() -> str:
     for candidate in (BACKEND_ROOT / ".venv" / "Scripts" / "python.exe", BACKEND_ROOT / ".venv" / "bin" / "python"):
         if candidate.exists():
             return str(candidate)
-    sys.exit("mock-servivce/backend/.venv not found; create it or set AUTARK_BACKEND_PYTHON.")
+    sys.exit(f"{BACKEND_ROOT / '.venv'} not found; create it or set AUTARK_BACKEND_PYTHON.")
 
 
 def free_port() -> int:

@@ -1,6 +1,6 @@
 """Run the real Flask backend against an isolated database with demo history.
 
-Started by run.py with the backend's own interpreter (mock-servivce/backend/.venv).
+Started by run.py with the backend's own interpreter (<Autark>/mock-servivce/backend/.venv).
 Usage: backend_fixture.py --database NAME --port PORT [--mode test-payments|chain]
 
 A new database gets the schema, every migration, the demo catalog and a little
@@ -12,11 +12,12 @@ import argparse
 import json
 import os
 import sys
-from pathlib import Path
 from unittest.mock import patch
 from uuid import uuid4
 
-ROOT = Path(__file__).resolve().parents[2] / 'mock-servivce'
+from service_root import service_root
+
+ROOT = service_root()
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--database', required=True)

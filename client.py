@@ -130,7 +130,7 @@ class Session:
             raise MockShopApiError(
                 None,
                 f"Could not connect to mock-service at {self._base}. "
-                "Start it with `bash mock-servivce/scripts/start.sh`.",
+                "Start it from the Autark repo with `bash mock-servivce/scripts/start.sh`.",
             ) from None
 
         payload = _decode(response)

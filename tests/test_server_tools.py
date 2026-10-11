@@ -7,6 +7,8 @@ from unittest.mock import patch
 from mcp.server.mcpserver.exceptions import ToolError
 from support import ConfigDirectoryTestCase, FakeSession, ledger, service
 
+from client import MockShopApiError
+
 import server
 
 NOW = datetime.now(timezone.utc).isoformat()
@@ -67,8 +69,29 @@ class ServerToolTests(ConfigDirectoryTestCase):
         self.assertEqual((tightened["created"], tightened["config"]["spending"]["max_per_transaction_minor"],
                           tightened["config"]["spending"]["daily_budget_minor"]), (False, 300, 2000))
 
+    async def test_configure_asks_the_marketplace_to_validate_preferences(self):
+        preferences = {"priorities": ["quality", "price"], "risk_tolerance": "low"}
+        await self.call("mock_shop_configure_agent", purpose="fruit", preferences=preferences)
+        check = self.session.made("POST", "/api/services/rank")
+        self.assertEqual([(call["json_body"], call["auth"]) for call in check], [({"preferences": preferences, "top_n": 1}, False)])
+        await self.call("mock_shop_configure_agent", purpose="vegetables")
+        self.assertEqual(len(self.session.made("POST", "/api/services/rank")), 1)
+
+    async def test_preferences_the_marketplace_rejects_are_not_saved(self):
+        self.write_config(purpose="fruit", preferences={"profile": "cheapest"})
+        before = self.config_file.read_text(encoding="utf-8")
+        for error, expected in ((MockShopApiError(400, "profile must be one of: cheapest, balanced."), "Error: profile must be one of"),
+                                (MockShopApiError(None, "Could not connect to mock-service."), "Error: Could not validate preferences")):
+            with self.subTest(error=error.status):
+                self.session.on("POST", "/api/services/rank", error)
+                answer = await self.call("mock_shop_configure_agent", preferences={"profile": "best"})
+                self.assertTrue(answer.startswith(expected), answer)
+                self.assertEqual(self.config_file.read_text(encoding="utf-8"), before)
+
     async def test_invalid_config_arguments_never_reach_the_file(self):
+        self.session.on("POST", "/api/services/rank", MockShopApiError(400, "profile must be one of: cheapest, balanced."))
         self.assertTrue((await self.call("mock_shop_configure_agent", preferences={"profile": "best"})).startswith("Error:"))
+        self.assertTrue((await self.call("mock_shop_configure_agent", preferences={"surprise": 1})).startswith("Error:"))
         self.assertFalse(self.config_file.exists())
         for arguments in ({"max_per_transaction_minor": -1}, {"allowed_kinds": ["service"]}, {"purchase_mode": "yolo"}, {"purpose": "x" * 501}):
             with self.subTest(arguments=arguments), self.assertRaises(ToolError):
@@ -279,10 +302,15 @@ class ServerToolTests(ConfigDirectoryTestCase):
                          "Error: 301 unit(s) cannot fit the per-transaction limit of 300 minor.")
         self.assertEqual(len(self.session.calls), calls)
 
-    async def test_invalid_ranking_preferences_stop_before_the_network(self):
-        answer = await self.call("mock_shop_rank_services", preferences={"profile": "best"})
-        self.assertTrue(answer.startswith("Error: profile must be one of"), answer)
+    async def test_malformed_ranking_preferences_stop_before_the_network(self):
+        answer = await self.call("mock_shop_rank_services", preferences={"surprise": 1})
+        self.assertEqual(answer, "Error: Unknown preferences fields: surprise.")
         self.assertEqual(self.session.calls, [])
+
+    async def test_invalid_preference_values_are_reported_by_the_marketplace(self):
+        self.session.on("POST", "/api/services/rank", MockShopApiError(400, "profile must be one of: cheapest, balanced."))
+        answer = await self.call("mock_shop_rank_services", preferences={"profile": "best"})
+        self.assertTrue(answer.startswith("Error: HTTP 400: profile must be one of"), answer)
 
     async def test_ranking_is_logged_and_never_spends(self):
         await self.call("mock_shop_rank_services", product_type="apple")

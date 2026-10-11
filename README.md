@@ -1,13 +1,18 @@
 # mock-shop MCP server
 
-stdio MCP server for the agent side of [mock-servivce](../mock-servivce/). Tools call the marketplace REST API. The bearer token stays in this process and is never returned to the model.
+stdio MCP server for the agent side of the Autark marketplace ([AutarkEOS/Autark](https://github.com/AutarkEOS/Autark), `mock-servivce/`). Tools call the marketplace REST API. The bearer token stays in this process and is never returned to the model.
 
-Requires Python 3.10+ and a running mock-service stack (`bash ../mock-servivce/scripts/start.sh`).
+Requires Python 3.10+ and a running marketplace stack. Clone Autark next to this repo and start it there:
+
+```bash
+git clone https://github.com/AutarkEOS/Autark.git ../Autark
+bash ../Autark/mock-servivce/scripts/start.sh
+```
 
 ## Setup
 
 ```bash
-cd mock-mcp
+cd autark-mcp
 python3 -m venv .venv
 .venv/bin/python -E -m pip install -r requirements.txt
 ```
@@ -26,10 +31,10 @@ Quick self-check:
 {
   "mcpServers": {
     "mock-shop": {
-      "command": "/absolute/path/to/Autark/mock-mcp/.venv/bin/python",
-      "args": ["-E", "/absolute/path/to/Autark/mock-mcp/server.py"],
+      "command": "/absolute/path/to/autark-mcp/.venv/bin/python",
+      "args": ["-E", "/absolute/path/to/autark-mcp/server.py"],
       "env": {
-        "MOCK_SERVICE_API_URL": "http://127.0.0.1:5000",
+        "MOCK_SERVICE_API_URL": "http://127.0.0.1:500",
         "MOCK_SHOP_USERNAME": "mcp_probe_agent",
         "MOCK_SHOP_PASSWORD": "probe-password-2026"
       }
@@ -38,11 +43,11 @@ Quick self-check:
 }
 ```
 
-`MOCK_SERVICE_API_URL` is optional. When it is omitted, the server reads `mock-servivce/config` (including `local.config.json`) and uses the backend host and port. Only loopback origins are accepted; a trailing `/api` is stripped, any other path is rejected.
+`MOCK_SERVICE_API_URL` is optional. When it is omitted, the server uses `http://127.0.0.1:500`, the backend port from Autark's default `mock-servivce/config/backend.config.json`. Set it when your `local.config.json` changes the backend host or port. Only loopback origins are accepted; a trailing `/api` is stripped, any other path is rejected.
 
 `MOCK_SHOP_USERNAME` and `MOCK_SHOP_PASSWORD` log in on the first tool that needs a session. `mock_shop_login` and `mock_shop_register` replace that session.
 
-`agent_1`, `agent_2`, and `agent_3` (`password123`) exist only after `bash scripts/start.sh --initial-seed`. That reset deletes business data, so a normal start does not create them. A migrated database with no users will make those env credentials return 401. Register an agent, or point the env vars at an account that exists. Demo seed agents also have no Solana keys. A newly registered agent has a keypair but no Devnet SOL, so purchase and compute funding fail until that address is funded.
+`agent_1`, `agent_2`, and `agent_3` (`password123`) exist only after `bash mock-servivce/scripts/start.sh --initial-seed` in the Autark repo. That reset deletes business data, so a normal start does not create them. A migrated database with no users will make those env credentials return 401. Register an agent, or point the env vars at an account that exists. Demo seed agents also have no Solana keys. A newly registered agent has a keypair but no Devnet SOL, so purchase and compute funding fail until that address is funded.
 
 ## Agent config
 
@@ -71,7 +76,7 @@ The agent is configured once and then follows that config: which offers it prefe
 }
 ```
 
-Every field is optional. `null` or a missing spending limit means no limit. `preferences` takes the same fields as `POST /api/services/rank` (see `mock-servivce/API.md`, "Ranking ofert") and is validated by the marketplace's own `backend/services/ranking.py`.
+Every field is optional. `null` or a missing spending limit means no limit. `preferences` takes the same fields as `POST /api/services/rank` (see [`mock-servivce/API.md`](https://github.com/AutarkEOS/Autark/blob/main/mock-servivce/API.md), "Ranking ofert"). This server only checks the field names; `mock_shop_configure_agent` asks the marketplace to validate the values before saving, so it needs a running backend. A hand-edited file with invalid values is reported by the marketplace on the next ranking.
 
 `mock_shop_configure_agent` creates the file on first use. After that the model may change `purpose` and `preferences` and may **tighten** spending, but it cannot raise or remove a limit, widen `allowed_kinds`, or switch `purchase_mode` from `ask` to `auto`. Those changes are a human edit of the file. `purchase_mode` is guidance for the model; the spending limits are what the code enforces.
 
@@ -94,7 +99,7 @@ The price can change between the quote and the payment; the marketplace charges 
 
 ### Marketplace account policy
 
-The same limits are also enforced by the marketplace itself (`GET`/`PUT /api/agent/spending-policy`, see `mock-servivce/API.md`), inside every paying transaction. A client that skips this server is still limited, and two parallel orders cannot both fit one budget.
+The same limits are also enforced by the marketplace itself (`GET`/`PUT /api/agent/spending-policy`, see [`mock-servivce/API.md`](https://github.com/AutarkEOS/Autark/blob/main/mock-servivce/API.md)), inside every paying transaction. A client that skips this server is still limited, and two parallel orders cannot both fit one budget.
 
 - `mock_shop_configure_agent` copies the limits to the marketplace whenever it sets or tightens them. The result has `marketplace_sync.status`: `synced`, `not_signed_in`, `marketplace_stricter` (the marketplace keeps tighter limits) or `failed`. A failed sync never blocks the local config.
 - The marketplace only accepts loosening with the account owner's `current_password`. After a human loosens the local file, `mock_shop_sync_spending_policy` pushes it. It sends the password only when this server was started with `MOCK_SHOP_USERNAME`/`MOCK_SHOP_PASSWORD` of the signed-in account; that password comes from the human's MCP config and never passes through the model. Otherwise the marketplace stays stricter.
@@ -169,7 +174,7 @@ The tests use a scripted marketplace session and a temporary config directory. T
 
 ### End-to-end
 
-`e2e/run.py` starts the real backend on a throwaway database `autark_e2e_<random>` and drives this server over stdio. It needs the PostgreSQL container from `mock-servivce` running and both venvs installed. The backend runs with `mock-servivce/backend/.venv` (override with `AUTARK_BACKEND_PYTHON`).
+`e2e/run.py` starts the real backend on a throwaway database `autark_e2e_<random>` and drives this server over stdio. It needs a checkout of the Autark repo: `../Autark` next to this repo, or the path to its `mock-servivce` directory in `AUTARK_SERVICE_ROOT`. Its PostgreSQL container must be running and both venvs installed. The backend runs with `mock-servivce/backend/.venv` from that checkout (override with `AUTARK_BACKEND_PYTHON`).
 
 ```bash
 .venv/bin/python -E e2e/run.py

@@ -1,12 +1,11 @@
 """Resolve mock-service API base URL, demo credentials, and timeouts."""
 
-import importlib.util
 import ipaddress
 import os
-from pathlib import Path
 from urllib.parse import urlparse
 
-MOCK_SERVICE_ROOT = Path(__file__).resolve().parent.parent / "mock-servivce"
+# Host port of the backend started by the Autark repo's stack scripts (mock-servivce/config/backend.config.json).
+DEFAULT_API_URL = "http://127.0.0.1:500"
 DEFAULT_TIMEOUT_SECONDS = 30.0
 FUNDING_TIMEOUT_SECONDS = 65.0
 COMPUTE_RUN_TIMEOUT_SECONDS = 90.0
@@ -43,30 +42,10 @@ def _validate_loopback_base_url(url: str) -> str:
     return origin.rstrip("/")
 
 
-def _load_mock_service_settings() -> dict:
-    runtime_path = MOCK_SERVICE_ROOT / "config" / "runtime.py"
-    if not runtime_path.is_file():
-        raise ConfigError(f"mock-servivce config not found at {runtime_path}")
-    spec = importlib.util.spec_from_file_location("mock_service_runtime", runtime_path)
-    if spec is None or spec.loader is None:
-        raise ConfigError("Could not load mock-servivce config.runtime")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module.load_config(MOCK_SERVICE_ROOT / "config")
-
-
 def api_base_url() -> str:
     """Return mock-service origin, e.g. http://127.0.0.1:5000."""
     override = os.environ.get("MOCK_SERVICE_API_URL", "").strip()
-    if override:
-        return _validate_loopback_base_url(override)
-
-    settings = _load_mock_service_settings()
-    host = settings["backend"]["host"]
-    port = settings["backend"]["port"]
-    if ":" in host and not host.startswith("["):
-        host = f"[{host}]"
-    return _validate_loopback_base_url(f"http://{host}:{port}")
+    return _validate_loopback_base_url(override or DEFAULT_API_URL)
 
 
 def env_credentials() -> tuple[str, str] | None:

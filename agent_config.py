@@ -4,7 +4,6 @@ The file is set once and then steers every search and purchase. It lives on the
 agent's machine, never in the marketplace, and holds no credentials.
 """
 
-import importlib.util
 import json
 import os
 import tempfile
@@ -12,14 +11,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from settings import MOCK_SERVICE_ROOT
-
 CONFIG_VERSION = 1
 KINDS = ("product", "api-usage", "compute")
 PURCHASE_MODES = ("ask", "auto")
 SPENDING_LIMITS = ("max_per_transaction_minor", "daily_budget_minor")
 MAX_MINOR = 2_147_483_647
 MAX_PURPOSE_LENGTH = 500
+# Top-level preference fields accepted by the marketplace ranking (POST /api/services/rank).
+PREFERENCE_FIELDS = ("profile", "priorities", "weights", "limits", "expectations", "risk_tolerance")
 
 
 class AgentConfigError(ValueError):
@@ -36,30 +35,15 @@ def audit_path() -> Path:
     return Path(override).expanduser() if override else config_path().parent / "decisions.jsonl"
 
 
-_ranking = None
-
-
-def ranking_rules():
-    """The marketplace's own preference rules, so both sides validate identically."""
-    global _ranking
-    if _ranking is None:
-        path = MOCK_SERVICE_ROOT / "backend" / "services" / "ranking.py"
-        spec = importlib.util.spec_from_file_location("mock_service_ranking", path)
-        if spec is None or spec.loader is None:
-            raise AgentConfigError(f"Ranking rules not found at {path}")
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        _ranking = module
-    return _ranking
-
-
 def validate_preferences(preferences: Any) -> dict[str, Any]:
+    """Check the shape only. The marketplace validates the values on every ranking request."""
     if preferences is None:
         return {}
-    try:
-        ranking_rules().normalize_preferences(preferences)
-    except ValueError as error:
-        raise AgentConfigError(str(error)) from None
+    if not isinstance(preferences, dict):
+        raise AgentConfigError("preferences must be a JSON object.")
+    unknown = sorted(str(key) for key in preferences.keys() - set(PREFERENCE_FIELDS))
+    if unknown:
+        raise AgentConfigError("Unknown preferences fields: " + ", ".join(unknown) + ".")
     return preferences
 
 
