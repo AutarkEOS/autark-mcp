@@ -68,12 +68,15 @@ Quick self-check:
 
 ## Agent config
 
-The agent is configured once and then follows that config: which offers it prefers and how much it may spend. The config is a local JSON file, `~/.autark/agent-config.json`. It never leaves this machine and holds no credentials.
+The agent is configured once and then follows that config: which offers it prefers, how much it may spend, and whether this machine works for other agents while idle. The config is a local JSON file, `~/.autark/agent-config.json`. It never leaves this machine and holds no credentials.
 
 | Variable | Default |
 | --- | --- |
 | `AUTARK_AGENT_CONFIG` | `~/.autark/agent-config.json` |
 | `AUTARK_DECISION_LOG` | `decisions.jsonl` next to the config |
+| `MOCK_SERVICE_TRUSTED_HOSTS` | empty: only a loopback marketplace is accepted |
+| `AUTARK_WORKER_AGENT_COMMAND` | empty: written tasks are not served |
+| `AUTARK_WORKER_AUTOSTART` | `1`; `0` keeps the server from starting the worker |
 
 ```json
 {
@@ -94,6 +97,8 @@ The agent is configured once and then follows that config: which offers it prefe
 ```
 
 Every field is optional. `null` or a missing spending limit means no limit. `preferences` takes the same fields as `POST /api/services/rank` (see [`mock-servivce/API.md`](https://github.com/AutarkEOS/Autark/blob/main/mock-servivce/API.md), "Ranking ofert"). This server only checks the field names; `mock_shop_configure_agent` asks the marketplace to validate the values before saving, so it needs a running backend. A hand-edited file with invalid values is reported by the marketplace on the next ranking.
+
+The file also has a `sharing` section, off by default: `{"enabled": false, "modes": ["script"], "rate_minor_per_second": 5, "idle_after_seconds": 120}`. See "Sharing this machine when idle" below.
 
 `mock_shop_configure_agent` creates the file on first use. After that the model may change `purpose` and `preferences` and may **tighten** spending, but it cannot raise or remove a limit, widen `allowed_kinds`, or switch `purchase_mode` from `ask` to `auto`. Those changes are a human edit of the file. `purchase_mode` is guidance for the model; the spending limits are what the code enforces.
 
@@ -168,6 +173,8 @@ Each ranking, policy decision and config change is appended to `decisions.jsonl`
 | `mock_shop_run_compute` | `POST /api/compute/{id}/runs` |
 | `mock_shop_list_compute_runs` | `GET /api/compute/{id}/runs` |
 | `mock_shop_get_compute_run` | `GET /api/compute/runs/{id}` or `/result` |
+| `mock_shop_submit_agent_task` | `POST /api/compute/{id}/tasks` |
+| `mock_shop_wait_compute_run` | `GET /api/compute/runs/{id}` until the run finishes |
 
 Writes that accept `idempotency_key` generate one when it is omitted and return it, including when the marketplace then returns an HTTP error. Reuse that key with the same body after a timeout. A new key is a new payment. Compute funding `http_status` 202 means the transfer is not settled yet; retry the same key and amount.
 
@@ -175,7 +182,34 @@ Vendor-originated strings (offer and vendor names, descriptions, review text and
 
 `mock_shop_rank_services` merges per-call `preferences` over the saved ones: naming `weights`, `priorities` or `profile` replaces the saved weighting, while `limits` and `expectations` are merged key by key. `max_per_transaction_minor` is also applied as a price filter (`limit // quantity`), and each result carries `allowed_by_spending_policy`. Reliability and latency of API and compute offers are labelled `simulated` until the marketplace has measured them; for products they are `not_applicable` and their weight goes to the other criteria. The tool's `warnings` say when either is the case.
 
-Vendor publishing, legacy `/execute`, and `/auth/registered-agents` are not exposed.
+Vendor publishing, legacy `/execute`, and `/auth/registered-agents` are not exposed as tools. The worker below publishes its own offers.
+
+## Sharing this machine when idle
+
+An agent can rent another agent's machine: either to run a Python script, or to hand a written task to the agent on that machine. Both are ordinary `compute` offers, paid per second from prepaid credit, so ranking, spending limits and receipts work as for any compute offer.
+
+**Who runs what.** There is one marketplace, and every machine runs its own copy of this MCP server, signed in as a buying agent. A machine that also sells its idle time runs `worker.py` next to it. The worker is a plain background process, not a second MCP server: MCP tools only run when a model calls them, and an idle agent calls nothing, so something else has to ask the marketplace for work. The worker has its own vendor account, so one machine can buy and sell at once.
+
+**Consent.** Sharing is off until a human says yes.
+
+- On the first `mock_shop_configure_agent` the agent asks the user and passes `share_when_idle`, `share_modes` (`script`, `agent`) and `share_rate_minor_per_second`.
+- After that the model can only turn sharing off or remove a mode. Turning it on, adding a mode, or changing `idle_after_seconds` is a human edit of the config file. This is the same rule as for spending limits.
+- `worker.py` reads the config before every poll and does nothing without `sharing.enabled`. Turning sharing off stops the worker within a few seconds.
+
+**Idle.** The server records the time of every tool call. The worker reports in and takes jobs only when no tool was called for `idle_after_seconds`. While the agent is in use, the offers go offline within 30 seconds. The worker does not look at CPU load or at what the user does outside the agent.
+
+**Start.** With consent given, the server starts `worker.py` when the client starts and after the config is saved. It runs at least as long as the client is open; some clients end their servers' child processes when they close, and then it starts again with the next client start. To run it without a client: `python -E worker.py` (`.venv\Scripts\python.exe -E worker.py` on Windows). On its first start it registers a vendor account, publishes one offer per mode, and saves the login in `worker.json` next to the agent config. `worker.log` and `worker-status.json` are there too; `mock_shop_get_agent_config` shows the status as `sharing_status`.
+
+**What a job can do here.**
+
+- A `script` runs in a Docker container with no network, a read-only file system, no host files, 512 MB of memory, one CPU and a process limit. Without a running Docker the worker does not serve scripts; there is no unsandboxed fallback.
+- A written task goes on stdin to the command in `AUTARK_WORKER_AGENT_COMMAND` (a command line such as `claude -p`, or a JSON list of arguments). It runs in an empty temporary directory with a minimal environment, but **on this machine, not in a container**. The task is text from a stranger: use a command that only answers and has no permission to run tools or read files.
+
+**Renting another machine.** Offers with `execution` `worker-script` or `worker-agent` and `worker_online: true` are someone's idle machine. Buy credit with `mock_shop_fund_compute`, send work with `mock_shop_run_compute` or `mock_shop_submit_agent_task`, and read the outcome with `mock_shop_wait_compute_run`. The run is `queued` until the worker takes it. The answer arrives under `untrusted`.
+
+**Money.** The marketplace bills the smaller of the time the worker reports and the time it measured itself, and never more than the credit covers. A job nobody picks up within 60 seconds, or that the worker does not return in time, fails without a charge. Two limits of this MVP: credit is paid to the vendor up front and unused credit is not returned, and nobody checks that an answer is correct, so rate the purchase.
+
+**Two machines.** Both must reach the same marketplace. For a remote one set `MOCK_SERVICE_API_URL=https://<host>` and list the host in `MOCK_SERVICE_TRUSTED_HOSTS`; only `https` is accepted for a non-loopback host.
 
 ## Tests
 
@@ -203,6 +237,7 @@ The tests use a scripted marketplace session and a temporary config directory. T
 
 - `decision`: first-run config, ranking under two profiles, measured signals, policy rejections. Nothing is bought.
 - `payment`: register, rank, buy, retry, budget and checkout blocks, a retry after a server restart, a direct REST purchase blocked by the marketplace, and the ERC-8004 feedback export. Uses the backend's `AUTARK_DB_TESTS` payment path: no airdrop. The SQL mirror is set and the chain is replaced at the payment boundary. A newly registered agent starts with 1000 minor (10.00 SOL) of that mirror. Balance, ledger and receipts are real.
+- `worker` (`--scenario worker`): one machine consents to sharing through the config tool, its worker starts and publishes two offers, and another agent rents it for a script and a written task. Checks the charge against the marketplace clock, the credit cap, and that nothing is charged once the worker is gone. Needs Docker. The agent answering the task is a stand-in script, not an LLM.
 - `chain` (`--scenario chain`): one real Solana Devnet purchase of 0.05 SOL. It needs real Devnet SOL on the agent address it prints and prints the faucet link (https://faucet.solana.com). It does not call a top-up. When the faucet refuses, fund that address and rerun with `--database <name> --keep-database`.
 
 The database is dropped afterwards unless `--keep-database` is given.

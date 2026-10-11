@@ -1,4 +1,4 @@
-"""Local agent configuration: purpose, spending limits and ranking preferences.
+"""Local agent configuration: purpose, spending limits, ranking preferences and idle sharing.
 
 The file is set once and then steers every search and purchase. It lives on the
 agent's machine, never in the marketplace, and holds no credentials.
@@ -19,6 +19,12 @@ MAX_MINOR = 2_147_483_647
 MAX_PURPOSE_LENGTH = 500
 # Top-level preference fields accepted by the marketplace ranking (POST /api/services/rank).
 PREFERENCE_FIELDS = ("profile", "priorities", "weights", "limits", "expectations", "risk_tolerance")
+# What this machine may do for other agents while its own agent is idle (see worker.py).
+SHARE_MODES = ("script", "agent")
+SHARING_DEFAULTS = {"enabled": False, "modes": ["script"], "rate_minor_per_second": 5, "idle_after_seconds": 120}
+# Tool argument -> sharing field. idle_after_seconds is a human edit of the file.
+SHARING_UPDATES = {"share_when_idle": "enabled", "share_modes": "modes", "share_rate_minor_per_second": "rate_minor_per_second"}
+MAX_SHARE_RATE = 1_000_000
 
 
 class AgentConfigError(ValueError):
@@ -47,6 +53,31 @@ def validate_preferences(preferences: Any) -> dict[str, Any]:
     return preferences
 
 
+def state_path(name: str) -> Path:
+    """Worker state lives next to the agent config: last-activity, worker.json, worker-status.json, worker.log."""
+    return config_path().parent / name
+
+
+def validate_sharing(raw: Any) -> dict[str, Any]:
+    sharing = {} if raw is None else raw
+    if not isinstance(sharing, dict):
+        raise AgentConfigError("sharing must be an object.")
+    unknown = sorted(str(key) for key in sharing.keys() - SHARING_DEFAULTS.keys())
+    if unknown:
+        raise AgentConfigError("sharing has unknown fields: " + ", ".join(unknown) + ".")
+    merged = {**SHARING_DEFAULTS, **sharing}
+    if type(merged["enabled"]) is not bool:
+        raise AgentConfigError("sharing.enabled must be true or false.")
+    modes = merged["modes"]
+    if not isinstance(modes, list) or not modes or any(mode not in SHARE_MODES for mode in modes) or len(set(modes)) != len(modes):
+        raise AgentConfigError("sharing.modes must list distinct values from: " + ", ".join(SHARE_MODES) + ".")
+    if type(merged["rate_minor_per_second"]) is not int or not 1 <= merged["rate_minor_per_second"] <= MAX_SHARE_RATE:
+        raise AgentConfigError(f"sharing.rate_minor_per_second must be an integer between 1 and {MAX_SHARE_RATE}.")
+    if type(merged["idle_after_seconds"]) is not int or not 0 <= merged["idle_after_seconds"] <= 86400:
+        raise AgentConfigError("sharing.idle_after_seconds must be an integer between 0 and 86400.")
+    return {**merged, "modes": sorted(modes)}
+
+
 def _limit(value: Any, name: str) -> int | None:
     if value is None:
         return None
@@ -59,7 +90,7 @@ def validate_config(raw: Any) -> dict[str, Any]:
     """Return a complete, normalized config or raise AgentConfigError."""
     if not isinstance(raw, dict):
         raise AgentConfigError("Agent config must be a JSON object.")
-    unknown = sorted(str(key) for key in raw.keys() - {"version", "purpose", "purchase_mode", "spending", "preferences"})
+    unknown = sorted(str(key) for key in raw.keys() - {"version", "purpose", "purchase_mode", "spending", "preferences", "sharing"})
     if unknown:
         raise AgentConfigError("Agent config has unknown fields: " + ", ".join(unknown) + ".")
     if raw.get("version", CONFIG_VERSION) != CONFIG_VERSION:
@@ -92,6 +123,7 @@ def validate_config(raw: Any) -> dict[str, Any]:
             "allowed_kinds": None if kinds is None else sorted(kinds),
         },
         "preferences": validate_preferences(raw.get("preferences")),
+        "sharing": validate_sharing(raw.get("sharing")),
     }
 
 
@@ -136,10 +168,11 @@ def apply_update(current: dict[str, Any] | None, update: dict[str, Any]) -> dict
     """Merge a tool-supplied update into the config.
 
     The model may create the config, change purpose and preferences, and tighten
-    spending. It may never loosen spending or switch itself to autonomous buying:
-    those changes are a human edit of the file.
+    spending. It may never loosen spending, switch itself to autonomous buying, or
+    open this machine to other agents' work after the first configuration: those
+    changes are a human edit of the file.
     """
-    unknown = sorted(update.keys() - {"purpose", "purchase_mode", "preferences", *SPENDING_LIMITS, "allowed_kinds"})
+    unknown = sorted(update.keys() - {"purpose", "purchase_mode", "preferences", *SPENDING_LIMITS, "allowed_kinds", *SHARING_UPDATES})
     if unknown:
         raise AgentConfigError("Unknown config fields: " + ", ".join(unknown) + ".")
     base = current or validate_config({})
@@ -151,6 +184,7 @@ def apply_update(current: dict[str, Any] | None, update: dict[str, Any]) -> dict
     for name in (*SPENDING_LIMITS, "allowed_kinds"):
         if name in update:
             spending[name] = update[name]
+    merged["sharing"] = {**base["sharing"], **{field: update[name] for name, field in SHARING_UPDATES.items() if name in update}}
     merged = validate_config(merged)
     if current is None:
         return merged
@@ -165,6 +199,12 @@ def apply_update(current: dict[str, Any] | None, update: dict[str, Any]) -> dict
     old_kinds, new_kinds = current["spending"]["allowed_kinds"], merged["spending"]["allowed_kinds"]
     if old_kinds is not None and (new_kinds is None or set(new_kinds) - set(old_kinds)):
         blocked.append(f"allowed_kinds {old_kinds} -> {'all' if new_kinds is None else new_kinds}")
+    # Sharing runs other agents' work here, so only a human may turn it on or widen it.
+    old_sharing, new_sharing = current["sharing"], merged["sharing"]
+    if new_sharing["enabled"] and not old_sharing["enabled"]:
+        blocked.append("sharing off -> on")
+    if new_sharing["enabled"] and set(new_sharing["modes"]) - set(old_sharing["modes"]):
+        blocked.append(f"sharing modes {old_sharing['modes']} -> {new_sharing['modes']}")
     if blocked:
         raise AgentConfigError(
             "This update would loosen the agent's own limits (" + "; ".join(blocked) + "). "

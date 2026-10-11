@@ -3,7 +3,9 @@
 Each scenario gets its own temporary agent-config directory. Checks are recorded
 with check(); a scenario never raises on a failed expectation.
 """
+import asyncio
 import json
+import math
 import os
 import sys
 from datetime import datetime, timezone
@@ -29,9 +31,10 @@ class Checks:
 class Agent:
     """One MCP server process, like one session of an agent client."""
 
-    def __init__(self, api_url: str, config_dir: Path, username: str | None = None, password: str | None = None):
+    def __init__(self, api_url: str, config_dir: Path, username: str | None = None, password: str | None = None,
+                 environment: dict[str, str] | None = None):
         env = {**os.environ, "MOCK_SERVICE_API_URL": api_url, "AUTARK_AGENT_CONFIG": str(config_dir / "agent-config.json"),
-               "AUTARK_DECISION_LOG": str(config_dir / "decisions.jsonl")}
+               "AUTARK_DECISION_LOG": str(config_dir / "decisions.jsonl"), **(environment or {})}
         env.pop("MOCK_SHOP_USERNAME", None)
         env.pop("MOCK_SHOP_PASSWORD", None)
         if username:
@@ -245,4 +248,133 @@ async def chain(api_url: str, config_dir: Path, check: Checks) -> None:
     await Agent(api_url, config_dir, username, password).run(steps)
 
 
-SCENARIOS = {"decision": decision, "payment": payment, "chain": chain}
+async def worker(api_url: str, config_dir: Path, check: Checks) -> None:
+    """One machine consents to share its idle time; another agent rents it for a script and a written task.
+
+    Needs Docker. Payments use the test path. The "agent" answering the task is a stand-in script, not an LLM.
+    """
+    seller_dir = config_dir / "seller"
+    seller_dir.mkdir()
+    stand_in = seller_dir / "stand_in_agent.py"
+    stand_in.write_text("import sys\nprint('DONE: ' + sys.stdin.read().strip())\n", encoding="utf-8")
+    seller = Agent(api_url, seller_dir, environment={
+        "AUTARK_WORKER_POLL_SECONDS": "1", "AUTARK_WORKER_AGENT_COMMAND": json.dumps([sys.executable, str(stand_in)])})
+
+    def worker_state():
+        try:
+            return json.loads((seller_dir / "worker-status.json").read_text(encoding="utf-8")).get("state")
+        except (OSError, ValueError):
+            return None
+
+    async def share(call):
+        created = await call("mock_shop_configure_agent", purpose="E2E machine that shares its idle time", share_when_idle=True,
+                             share_modes=["script", "agent"], share_rate_minor_per_second=5)
+        check("first configuration records the consent and starts the worker",
+              created["config"]["sharing"]["enabled"] is True and created["sharing_status"]["worker"] == "starting",
+              str(created["sharing_status"]["worker"]))
+        # idle_after_seconds is a human setting; the test plays the human so it need not wait two minutes.
+        config = json.loads((seller_dir / "agent-config.json").read_text(encoding="utf-8"))
+        config["sharing"]["idle_after_seconds"] = 0
+        (seller_dir / "agent-config.json").write_text(json.dumps(config), encoding="utf-8")
+        # The seller's client stays open while the other agent rents the machine.
+        await Agent(api_url, config_dir).run(lambda renter: rent(renter, call))
+
+    async def revoke(call):
+        off = await call("mock_shop_configure_agent", share_when_idle=False)
+        check("the model can turn sharing off", off["config"]["sharing"]["enabled"] is False, str(off)[:200])
+        again = await call("mock_shop_configure_agent", share_when_idle=True)
+        check("but only a human can turn it back on", isinstance(again, str) and "Only a human" in again, str(again)[:120])
+
+    async def rent(call, seller_call):
+        await call("mock_shop_register", username="e2e-renter", password="e2e-password-2026")
+        offers = {}
+        for _ in range(240):  # the first start may pull the sandbox image
+            listed = await call("mock_shop_list_services", kind="compute")
+            offers = {service["execution"]: service for service in listed["services"] if service.get("worker_online")}
+            if len(offers) == 2:
+                break
+            await asyncio.sleep(1)
+        log = (seller_dir / "worker.log").read_text(encoding="utf-8")[-300:] if (seller_dir / "worker.log").exists() else "no worker log"
+        check("the worker started on its own and published both offers as online", set(offers) == {"worker-script", "worker-agent"},
+              log if len(offers) != 2 else "")
+        if len(offers) != 2:
+            return
+        script, agent = offers["worker-script"]["id"], offers["worker-agent"]["id"]
+        check("the offers hide how they are reached", all("url" not in offer and offer["price_minor"] == 5 for offer in offers.values()))
+        ranked = await call("mock_shop_rank_services", service_ids=[script])
+        check("ranking accepts an online worker", ranked["decision"]["winner"]["service_id"] == script)
+
+        funded = await call("mock_shop_fund_compute", service_id=script, amount_minor=100)
+        check("credit is bought for the script offer", funded.get("account", {}).get("balance_minor") == 100, str(funded.get("error") or ""))
+        queued = await call("mock_shop_run_compute", service_id=script, source="print(6 * 7)")
+        check("the script is queued, not run by the marketplace", (queued.get("http_status"), queued.get("run_status")) == (202, "queued"),
+              str(queued.get("error") or ""))
+        run = (await call("mock_shop_wait_compute_run", run_id=queued["run"]["id"], timeout_seconds=120))["run"]
+        result = run.get("result") or {}
+        check("the other machine ran it and the output came back as untrusted data",
+              run["status"] == "completed" and (result.get("untrusted") or {}).get("stdout") == "42\n", str(run.get("error") or run["status"]))
+        billed = float(run.get("elapsed_compute_seconds") or 0)
+        check("billed per second by the marketplace clock, never more than the worker reported",
+              run["charge_minor"] == math.ceil(billed * 5) and billed <= float(result.get("reported_elapsed_seconds", 0)) + 0.001,
+              f"{billed} s -> {run['charge_minor']} minor")
+        account = (await call("mock_shop_get_compute_account", service_id=script))["account"]
+        check("credit went down by exactly the charge", account["balance_minor"] == 100 - run["charge_minor"], str(account["balance_minor"]))
+
+        stuck = await call("mock_shop_run_compute", service_id=script, source="import time\nwhile True: time.sleep(1)")
+        slow = (await call("mock_shop_wait_compute_run", run_id=stuck["run"]["id"], timeout_seconds=120))["run"]
+        check("a script that never ends is stopped when the credit runs out",
+              slow["status"] == "completed" and slow["result"]["timed_out"] is True, f"{slow['status']} after {slow.get('elapsed_compute_seconds')} s")
+        left = (await call("mock_shop_get_compute_account", service_id=script))["account"]["balance_minor"]
+        check("and the credit is never overdrawn", left >= 0 and slow["charge_minor"] <= account["balance_minor"], f"{left} left")
+
+        await call("mock_shop_fund_compute", service_id=agent, amount_minor=200)
+        refused = await call("mock_shop_run_compute", service_id=agent, source="print(1)")
+        check("an agent offer does not take scripts", "written tasks only" in str(refused.get("error")), str(refused.get("error"))[:80])
+        task = await call("mock_shop_submit_agent_task", service_id=agent, task="Count the vowels in 'marketplace'.")
+        check("the written task is queued", (task.get("http_status"), task["run"]["status"], task["run"]["job_type"]) == (202, "queued", "task"))
+        answered = (await call("mock_shop_wait_compute_run", run_id=task["run"]["id"], timeout_seconds=120))["run"]
+        answer = ((answered.get("result") or {}).get("untrusted") or {}).get("output", "")
+        check("the idle agent's answer comes back as untrusted data, billed per second",
+              answered["status"] == "completed" and answer.strip() == "DONE: Count the vowels in 'marketplace'." and answered["charge_minor"] >= 1,
+              f"{answer.strip()!r}, {answered['charge_minor']} minor")
+
+        await revoke(seller_call)
+        for _ in range(30):
+            if worker_state() == "stopped":
+                break
+            await asyncio.sleep(1)
+        check("the worker stops by itself once sharing is off", worker_state() == "stopped", str(worker_state()))
+        before = (await call("mock_shop_get_compute_account", service_id=agent))["account"]["balance_minor"]
+        orphan = await call("mock_shop_submit_agent_task", service_id=agent, task="Anyone there?")
+        if isinstance(orphan, dict) and orphan.get("run", {}).get("status") == "queued":
+            lost = (await call("mock_shop_wait_compute_run", run_id=orphan["run"]["id"], timeout_seconds=120))["run"]
+            unpaid = lost["status"] == "failed" and lost["charge_minor"] == 0
+        else:
+            unpaid = "offline" in str(orphan)
+        after = (await call("mock_shop_get_compute_account", service_id=agent))["account"]["balance_minor"]
+        check("with the worker gone a job fails and nothing is charged", unpaid and after == before, f"{before} -> {after}")
+        gone = None
+        for _ in range(45):
+            gone = (await call("mock_shop_get_service", service_id=script))["service"]["worker_online"]
+            if gone is False:
+                break
+            await asyncio.sleep(1)
+        check("the offer drops out of the catalog as offline", gone is False)
+        ranked = await call("mock_shop_rank_services", service_ids=[script])
+        check("ranking eliminates the offline worker",
+              [reason["limit"] for item in ranked["decision"]["eliminated"] for reason in item["reasons"]] == ["worker_online"])
+
+    try:
+        await seller.run(share)
+    finally:
+        # Never leave the worker behind: without consent it exits within a poll.
+        config = json.loads((seller_dir / "agent-config.json").read_text(encoding="utf-8"))
+        config["sharing"]["enabled"] = False
+        (seller_dir / "agent-config.json").write_text(json.dumps(config), encoding="utf-8")
+        for _ in range(30):
+            if worker_state() in (None, "stopped"):
+                break
+            await asyncio.sleep(1)
+
+
+SCENARIOS = {"decision": decision, "payment": payment, "chain": chain, "worker": worker}

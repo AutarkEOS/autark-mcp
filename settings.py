@@ -15,6 +15,11 @@ class ConfigError(ValueError):
     pass
 
 
+def trusted_hosts() -> set[str]:
+    """Remote marketplace hosts a human listed in MOCK_SERVICE_TRUSTED_HOSTS (comma separated)."""
+    return {host.strip().lower() for host in os.environ.get("MOCK_SERVICE_TRUSTED_HOSTS", "").split(",") if host.strip()}
+
+
 def _validate_loopback_base_url(url: str) -> str:
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https"):
@@ -24,15 +29,19 @@ def _validate_loopback_base_url(url: str) -> str:
     host = parsed.hostname
     if not host:
         raise ConfigError("API URL must include a host.")
-    if host != "localhost":
+    if host.lower() in trusted_hosts():
+        # The session token and payments leave this machine, so a remote host needs TLS.
+        if parsed.scheme != "https":
+            raise ConfigError("A trusted remote API URL must use https.")
+    elif host != "localhost":
         try:
             address = ipaddress.ip_address(host)
         except ValueError as error:
             raise ConfigError(
-                "API URL host must be loopback (127.0.0.1, ::1, or localhost)."
+                "API URL host must be loopback (127.0.0.1, ::1, or localhost) or listed in MOCK_SERVICE_TRUSTED_HOSTS."
             ) from error
         if not address.is_loopback:
-            raise ConfigError("API URL host must be loopback to avoid SSRF.")
+            raise ConfigError("API URL host must be loopback or listed in MOCK_SERVICE_TRUSTED_HOSTS, to avoid SSRF.")
     origin = url.rstrip("/")
     # Paths are joined as f"{base}/api/...", so a configured ".../api" suffix would double up.
     if origin.lower().endswith("/api"):

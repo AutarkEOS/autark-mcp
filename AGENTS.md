@@ -25,6 +25,7 @@ Until October 2026 this code was the `mock-mcp/` directory of the Autark repo. I
 | `agent_config.py` | Local agent config (`~/.autark/agent-config.json`) and the decision log |
 | `settings.py` | API base URL (loopback validation), env credentials, timeouts |
 | `x402_client.py` | x402 V2 client. Signing a payment is not implemented: it needs an agent-held Solana key |
+| `worker.py` | Background process that sells this machine's idle time: polls the marketplace for jobs, runs them, returns results |
 | `tests/` | Unit tests with a scripted marketplace session; no stack, no payments |
 | `e2e/` | End-to-end scenarios against the real backend on a throwaway database |
 
@@ -38,6 +39,9 @@ Until October 2026 this code was the `mock-mcp/` directory of the Autark repo. I
 - **Payments are idempotent.** Writes that take `idempotency_key` must stay safe to retry with the same key and body; a new key is a new payment.
 - **Do not present simulated data as measured**, and never report a payment as settled when it was only prepared or simulated.
 - **This process must never hold the marketplace's `SOLANA_ENCRYPTION_KEY`** or decrypt keys the marketplace stores.
+- **Sharing this machine needs a human's consent.** The model may set `sharing` on the first configuration and may later turn it off or narrow it. It may never turn it on, add a mode, or change `idle_after_seconds`. `worker.py` checks `sharing.enabled` itself before every poll; do not add a way around that check.
+- **A job is a stranger's input.** A script runs only in the Docker sandbox in `worker.run_script`; never add a fallback that runs it on the host. A task text is data for the agent command, which gets a minimal environment and none of this machine's secrets. The command itself comes only from `AUTARK_WORKER_AGENT_COMMAND`, never from the config file or a tool argument.
+- **The worker and the server are separate accounts.** The server is the buying agent; the worker is a vendor with its own login in `worker.json`. Do not let the worker use `MOCK_SHOP_USERNAME`/`MOCK_SHOP_PASSWORD`.
 
 ## Commands
 
@@ -59,6 +63,6 @@ python3 -m venv .venv
 .venv/bin/python -E e2e/run.py
 ```
 
-Run the unit tests after every change. Run `e2e/run.py` when you change a tool that talks to the marketplace; it needs the Autark checkout, its PostgreSQL container running, `mock-servivce/backend/.venv` installed, and `POSTGRES_PASSWORD` and `SOLANA_ENCRYPTION_KEY` available to the backend (Autark's `mock-servivce/.env` or the environment). `--scenario chain` spends real Devnet SOL; do not run it unless asked.
+Run the unit tests after every change. Run `e2e/run.py` when you change a tool that talks to the marketplace, and `e2e/run.py --scenario worker` (needs Docker) when you change `worker.py` or the sharing config; it needs the Autark checkout, its PostgreSQL container running, `mock-servivce/backend/.venv` installed, and `POSTGRES_PASSWORD` and `SOLANA_ENCRYPTION_KEY` available to the backend (Autark's `mock-servivce/.env` or the environment). `--scenario chain` spends real Devnet SOL; do not run it unless asked.
 
 When you add or change a tool, update the tool table in [README.md](README.md).
