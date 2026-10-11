@@ -113,5 +113,7 @@ class MarketplaceSyncTests(ConfigDirectoryTestCase):
         self.session.on("POST", "/api/purchases", MockShopApiError(
             403, "Blocked by the account spending policy: total 200 minor exceeds the per-transaction limit of 100 minor."))
         answer = await self.call("mock_shop_purchase", items=[{"product_id": "apple", "quantity": 2}])
-        self.assertIn("HTTP 403: Blocked by the account spending policy", answer)
-        self.assertIn("Nothing was spent", answer)
+        self.assertIn("HTTP 403: Blocked by the account spending policy", answer["error"])
+        self.assertIn("Nothing was spent", answer["hint"])
+        self.assertRegex(answer["idempotency_key"], r"^mcp-")
+        self.assertIn("new key is a new payment", answer["hint"].lower())
