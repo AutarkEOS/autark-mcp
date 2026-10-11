@@ -20,7 +20,8 @@ class AgentConfigTests(ConfigDirectoryTestCase):
         self.assertEqual(validate_config({}), {
             "version": 1, "purpose": "", "purchase_mode": "ask",
             "spending": {"max_per_transaction_minor": None, "daily_budget_minor": None, "allowed_kinds": None},
-            "preferences": {}})
+            "preferences": {},
+            "sharing": {"enabled": False, "modes": ["script"], "rate_minor_per_second": 5, "idle_after_seconds": 120}})
 
     def test_save_and_load_round_trip_without_leftovers(self):
         saved = save_config(LIMITED)
@@ -58,6 +59,9 @@ class AgentConfigTests(ConfigDirectoryTestCase):
             {"spending": {"allowed_kinds": "product"}}, {"spending": {"allowed_kinds": ["service"]}},
             {"spending": {"allowed_kinds": ["product", "product"]}},
             {"preferences": []}, {"preferences": "cheapest"}, {"preferences": {"surprise": 1}},
+            {"sharing": []}, {"sharing": {"enabled": "yes"}}, {"sharing": {"modes": []}}, {"sharing": {"modes": ["gpu"]}},
+            {"sharing": {"modes": ["script", "script"]}}, {"sharing": {"rate_minor_per_second": 0}},
+            {"sharing": {"idle_after_seconds": -1}}, {"sharing": {"agent_command": "rm -rf /"}},
         ]
         for raw in invalid:
             with self.subTest(raw=raw), self.assertRaises(AgentConfigError):
@@ -104,6 +108,28 @@ class TightenOnlyTests(ConfigDirectoryTestCase):
                 apply_update(self.current, update)
             self.assertIn(str(self.config_file), str(raised.exception))
             self.assertIn("Only a human", str(raised.exception))
+
+    def test_first_configuration_may_turn_sharing_on(self):
+        created = apply_update(None, {"share_when_idle": True, "share_modes": ["agent", "script"], "share_rate_minor_per_second": 9})
+        self.assertEqual(created["sharing"], {"enabled": True, "modes": ["agent", "script"], "rate_minor_per_second": 9, "idle_after_seconds": 120})
+
+    def test_only_a_human_turns_sharing_on_or_widens_it_later(self):
+        for update in ({"share_when_idle": True}, {"share_when_idle": True, "share_modes": ["script"]}):
+            with self.subTest(update=update), self.assertRaises(AgentConfigError) as raised:
+                apply_update(self.current, update)
+            self.assertIn("Only a human", str(raised.exception))
+        sharing = validate_config({**LIMITED, "sharing": {"enabled": True, "modes": ["script"]}})
+        with self.assertRaises(AgentConfigError):
+            apply_update(sharing, {"share_modes": ["script", "agent"]})
+
+    def test_sharing_can_be_narrowed_repriced_and_turned_off(self):
+        sharing = validate_config({**LIMITED, "sharing": {"enabled": True, "modes": ["script", "agent"]}})
+        self.assertEqual(apply_update(sharing, {"share_modes": ["script"]})["sharing"]["modes"], ["script"])
+        self.assertEqual(apply_update(sharing, {"share_rate_minor_per_second": 2})["sharing"]["rate_minor_per_second"], 2)
+        off = apply_update(sharing, {"share_when_idle": False})
+        self.assertFalse(off["sharing"]["enabled"])
+        with self.assertRaises(AgentConfigError):
+            apply_update(off, {"share_when_idle": True})
 
     def test_unset_limits_can_be_introduced_later(self):
         open_config = validate_config({})

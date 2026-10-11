@@ -64,9 +64,11 @@ class ConfigDirectoryTestCase(unittest.IsolatedAsyncioTestCase):
         self.directory = Path(self._directory.name)
         self.config_file = self.directory / "agent-config.json"
         self.audit_file = self.directory / "decisions.jsonl"
-        previous = {name: os.environ.get(name) for name in ("AUTARK_AGENT_CONFIG", "AUTARK_DECISION_LOG")}
+        previous = {name: os.environ.get(name) for name in ("AUTARK_AGENT_CONFIG", "AUTARK_DECISION_LOG", "AUTARK_WORKER_AUTOSTART")}
         os.environ["AUTARK_AGENT_CONFIG"] = str(self.config_file)
         os.environ["AUTARK_DECISION_LOG"] = str(self.audit_file)
+        # No test may leave a background worker behind.
+        os.environ["AUTARK_WORKER_AUTOSTART"] = "0"
 
         def restore() -> None:
             for name, value in previous.items():
