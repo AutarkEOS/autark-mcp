@@ -7,7 +7,9 @@ its own compute offers, runs them, and returns the result. It is paid per second
 
 It only works while the human consented: `sharing.enabled` in the agent config. The
 MCP server starts it; `python -E worker.py` starts it by hand. It keeps its own vendor
-account in worker.json next to the agent config, separate from the buying agent.
+account, separate from the buying agent: the login and the payout key in the system
+credential store (vault.py), and only public details in worker.json next to the agent config.
+Sales are paid to that payout key, which never leaves this machine.
 
 Jobs come from strangers. A script runs in a Docker container with no network; a
 written task is handed to the command in AUTARK_WORKER_AGENT_COMMAND as data.
@@ -34,6 +36,7 @@ from uuid import uuid4
 from agent_config import AgentConfigError, load_config, state_path
 from client import MockShopApiError, Session
 from settings import api_base_url
+import vault
 
 POLL_SECONDS = float(os.environ.get("AUTARK_WORKER_POLL_SECONDS", "3"))
 HEARTBEAT_SECONDS = 10
@@ -53,12 +56,14 @@ def log(message: str) -> None:
     print(time.strftime("%Y-%m-%d %H:%M:%S ") + message, flush=True)
 
 
-def write_json(path: Path, data: Any) -> None:
+def write_json(path: Path, data: Any, private: bool = False) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + f".{os.getpid()}.tmp")
+    temporary.touch()
+    if private or os.name != "nt":
+        # Restricted before anything is written; os.replace keeps the permissions.
+        vault.restrict_to_owner(temporary)
     temporary.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-    if os.name != "nt":
-        temporary.chmod(0o600)
     os.replace(temporary, path)
 
 
@@ -211,11 +216,25 @@ class Worker:
     # --- account --------------------------------------------------------
 
     def _saved(self) -> dict[str, Any]:
+        """Public details of the vendor account per marketplace: username, payout address and offers. No secrets."""
         state = read_json(state_path("worker.json"))
         return state if isinstance(state, dict) else {}
 
     def _save(self, account: dict[str, Any]) -> None:
-        write_json(state_path("worker.json"), {**self._saved(), self.api_url: account})
+        public = {key: value for key, value in account.items() if key in ("username", "payout_address", "offers")}
+        write_json(state_path("worker.json"), {**self._saved(), self.api_url: public}, private=True)
+
+    def _secret(self) -> dict[str, Any] | None:
+        """The login for this marketplace from the credential store. A password an older worker left in worker.json moves there."""
+        secret = vault.load(self.api_url)
+        legacy = self._saved().get(self.api_url)
+        if isinstance(legacy, dict) and "password" in legacy:
+            if secret is None or secret.get("username") != legacy.get("username"):
+                secret = {**(secret or {}), "username": legacy["username"], "password": legacy["password"]}
+                vault.save(self.api_url, secret)
+            self._save(legacy)
+            log(f"Moved the worker password out of worker.json into {vault.store_name()}.")
+        return secret
 
     async def _sign_in(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
         _status, answer = await self.session.request("POST", path, json_body=body, auth=False)
@@ -223,21 +242,29 @@ class Worker:
         return answer
 
     async def sign_in(self) -> dict[str, Any]:
-        """Use the vendor account saved for this marketplace, or register one. The password never leaves this machine."""
-        account = self._saved().get(self.api_url)
-        if isinstance(account, dict):
+        """Sign in with the stored login, or register a vendor that is paid to a key made here and never sent anywhere."""
+        secret = self._secret()
+        if secret is not None:
             try:
-                await self._sign_in("/api/auth/login", {"username": account["username"], "password": account["password"]})
-                return account
+                await self._sign_in("/api/auth/login", {"username": secret["username"], "password": secret["password"]})
+                return {**(self._saved().get(self.api_url) or {}), "username": secret["username"]}
             except MockShopApiError as error:
-                if error.status != 401:
+                if error.status not in (401, 403):
                     raise
-                log("The saved worker account no longer exists on this marketplace; registering a new one.")
+                log("The stored worker account cannot sign in to this marketplace any more; registering a new one.")
         host = re.sub(r"[^a-z0-9-]", "-", socket.gethostname().lower())[:30].strip("-") or "machine"
-        account = {"username": f"worker-{host}-{secrets.token_hex(3)}", "password": secrets.token_urlsafe(24), "offers": {}}
-        await self._sign_in("/api/auth/register", {"username": account["username"], "password": account["password"], "role": "vendor"})
+        username, seed = f"worker-{host}-{secrets.token_hex(3)}", vault.new_payout_seed()
+        retired = [*(secret or {}).get("retired_payout_seeds", []), *([secret["payout_seed"]] if (secret or {}).get("payout_seed") else [])]
+        new = {"username": username, "password": secrets.token_urlsafe(24), "payout_seed": seed, "retired_payout_seeds": retired}
+        # Stored before the marketplace knows the account: a crash cannot leave an account nobody can sign in to,
+        # and keys an earlier account was paid to are kept.
+        vault.save(self.api_url, new)
+        await self._sign_in("/api/auth/register", {
+            "username": username, "password": new["password"], "role": "vendor", "payout_pubkey": vault.payout_address(seed),
+            "payout_signature": vault.sign(seed, f"Autark payout address for {username}".encode())})
+        account = {"username": username, "payout_address": vault.payout_address(seed), "offers": {}}
         self._save(account)
-        log(f"Registered vendor account {account['username']}.")
+        log(f"Registered vendor account {username}. Sales are paid to {account['payout_address']}; its key stays in {vault.store_name()}.")
         return account
 
     async def call(self, method: str, path: str, **arguments: Any) -> tuple[int, dict[str, Any]]:
@@ -256,8 +283,11 @@ class Worker:
         account = self._saved().get(self.api_url) or {}
         saved = dict(account.get("offers") or {})
         _status, listing = await self.call("GET", "/api/vendor/services")
-        existing = {service["id"]: service for service in listing.get("services", [])}
+        # A withdrawn offer takes no jobs; a mode shared again gets a new one.
+        existing = {service["id"]: service for service in listing.get("services", []) if not service.get("archived_at")}
         host = socket.gethostname()
+        for mode in sorted(set(saved) - set(sharing["modes"])):
+            await self.withdraw(saved.pop(mode))
         for mode in sharing["modes"]:
             offer = existing.get(saved.get(mode))
             if offer is None:
@@ -278,11 +308,33 @@ class Worker:
         self._save({**account, "offers": saved})
         self.offers = {mode: saved[mode] for mode in sharing["modes"]}
 
+    async def withdraw(self, offer: str) -> None:
+        try:
+            await self.call("DELETE", f"/api/vendor/services/{offer}")
+            log(f"Withdrew offer {offer}.")
+        except MockShopApiError as error:
+            if error.status not in (404, 410):
+                raise
+
+    async def withdraw_all(self) -> None:
+        """Sharing was turned off: take this machine's offers out of the catalog instead of leaving them offline."""
+        account = self._saved().get(self.api_url) or {}
+        if not account.get("offers"):
+            return
+        try:
+            await self.sign_in()
+            for offer in account["offers"].values():
+                await self.withdraw(offer)
+            self._save({**account, "offers": {}})
+        except (MockShopApiError, vault.VaultError) as error:
+            log(f"The offers stay listed as offline; withdrawing them failed: {error}")
+
     # --- work -----------------------------------------------------------
 
     def report(self, state: str) -> None:
         write_json(state_path("worker-status.json"), {
             "pid": os.getpid(), "state": state, "updated_at": time.time(), "api_url": self.api_url, "offers": self.offers,
+            "payout_address": (self._saved().get(self.api_url) or {}).get("payout_address"),
             "unavailable": self.unavailable, "busy_with": self.busy_with, "last_error": self.last_error})
 
     async def keep_reporting(self) -> None:
@@ -325,12 +377,14 @@ class Worker:
         published_for = None
         while True:
             try:
-                config = load_config()
+                config, readable = load_config(), True
             except AgentConfigError as error:
                 log(f"Agent config is unreadable, so nothing is shared: {error}")
-                config = None
+                config, readable = None, False
             sharing = (config or {}).get("sharing")
             if not sharing or not sharing["enabled"]:
+                if readable:
+                    await self.withdraw_all()
                 log("Sharing is not enabled in the agent config. Stopping.")
                 self.report("stopped")
                 return 0
@@ -348,9 +402,17 @@ class Worker:
                         if status == 200:
                             await self.serve(mode, answer["job"])
                 self.report("idle" if idle else "agent-active")
+            except vault.VaultError as error:
+                self.last_error = str(error)
+                log(self.last_error)
+                self.report("stopped")
+                return 1
             except MockShopApiError as error:
                 self.last_error = error.message
                 log(f"Marketplace: {error.message}")
+                if error.status == 410:
+                    # An offer was withdrawn elsewhere; publish again on the next round.
+                    published_for = None
                 self.report("error")
             if once:
                 return 0
@@ -372,7 +434,16 @@ class Worker:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--once", action="store_true", help="Poll once and exit (used by tests).")
+    parser.add_argument("--export-payout-key", action="store_true",
+                        help="Print the payout key as a Solana keypair JSON array, to import into a wallet. Keep the output secret.")
     options = parser.parse_args()
+    if options.export_payout_key:
+        secret = vault.load(api_base_url()) or {}
+        if not secret.get("payout_seed"):
+            print("This worker has no payout key of its own on this marketplace; its sales go to a wallet the marketplace keeps.", file=sys.stderr)
+            return 1
+        print(json.dumps(vault.solana_keypair(secret["payout_seed"])))
+        return 0
     # The buying agent's login is not this process's business.
     os.environ.pop("MOCK_SHOP_USERNAME", None)
     os.environ.pop("MOCK_SHOP_PASSWORD", None)

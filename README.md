@@ -198,12 +198,20 @@ An agent can rent another agent's machine: either to run a Python script, or to 
 
 **Idle.** The server records the time of every tool call. The worker reports in and takes jobs only when no tool was called for `idle_after_seconds`. While the agent is in use, the offers go offline within 30 seconds. The worker does not look at CPU load or at what the user does outside the agent.
 
-**Start.** With consent given, the server starts `worker.py` when the client starts and after the config is saved. It runs at least as long as the client is open; some clients end their servers' child processes when they close, and then it starts again with the next client start. To run it without a client: `python -E worker.py` (`.venv\Scripts\python.exe -E worker.py` on Windows). On its first start it registers a vendor account, publishes one offer per mode, and saves the login in `worker.json` next to the agent config. `worker.log` and `worker-status.json` are there too; `mock_shop_get_agent_config` shows the status as `sharing_status`.
+**Start.** With consent given, the server starts `worker.py` when the client starts and after the config is saved. It runs at least as long as the client is open; some clients end their servers' child processes when they close, and then it starts again with the next client start. To run it without a client: `python -E worker.py` (`.venv\Scripts\python.exe -E worker.py` on Windows). On its first start it registers a vendor account and publishes one offer per mode. `worker.json`, `worker.log` and `worker-status.json` are next to the agent config; `mock_shop_get_agent_config` shows the status as `sharing_status`.
+
+**Secrets and earnings.**
+
+- The worker's login and its payout key are kept in the system credential store: Windows Credential Manager, the macOS Keychain, or a Secret Service on Linux (GNOME Keyring, KWallet). `worker.json` holds only the username, the payout address and the offer ids, readable by the owner only (mode 600; on Windows an ACL without inherited entries).
+- Without a credential store the worker does not start; there is no plaintext fallback. On a Linux machine without a desktop session, start `gnome-keyring-daemon` with D-Bus first.
+- The worker creates its payout key on this machine and registers only the address, with a signature that proves the key is its own. Sales go straight to that key; the marketplace never holds it. `python -E worker.py --export-payout-key` prints it as a Solana keypair JSON array to import into a wallet. If the account is ever replaced, the old key stays in the credential store.
+- A worker that an older version set up moves its password out of `worker.json` into the credential store on the next start. That account keeps being paid to a wallet the marketplace holds.
+- Turning sharing off, or removing a mode, withdraws the offer from the catalog. Credit that buyers already hold and their run history stay readable.
 
 **What a job can do here.**
 
 - A `script` runs in a Docker container with no network, a read-only file system, no host files, 512 MB of memory, one CPU and a process limit. Without a running Docker the worker does not serve scripts; there is no unsandboxed fallback.
-- A written task goes on stdin to the command in `AUTARK_WORKER_AGENT_COMMAND` (a command line such as `claude -p`, or a JSON list of arguments). It runs in an empty temporary directory with a minimal environment, but **on this machine, not in a container**. The task is text from a stranger: use a command that only answers and has no permission to run tools or read files.
+- A written task goes on stdin to the command in `AUTARK_WORKER_AGENT_COMMAND` (a command line such as `claude -p`, or a JSON list of arguments). It runs in an empty temporary directory with a minimal environment, but **on this machine, not in a container**. The task is text from a stranger: use a command that only answers and has no permission to run tools or read files. The credential store does not protect against such a command: any program running as this user can ask it for the worker's secrets.
 
 **Renting another machine.** Offers with `execution` `worker-script` or `worker-agent` and `worker_online: true` are someone's idle machine. Buy credit with `mock_shop_fund_compute`, send work with `mock_shop_run_compute` or `mock_shop_submit_agent_task`, and read the outcome with `mock_shop_wait_compute_run`. The run is `queued` until the worker takes it. The answer arrives under `untrusted`.
 

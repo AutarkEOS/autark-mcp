@@ -1,17 +1,32 @@
 """The idle worker: consent, idleness, the vendor account, and running other agents' jobs."""
 
 import base64
+import io
 import json
 import os
 import sys
 import time
+from contextlib import redirect_stdout
 from unittest.mock import AsyncMock, patch
+
+import keyring
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+from keyring.backends import fail
 
 from support import ConfigDirectoryTestCase, FakeSession
 
 import settings
+import vault
 import worker
 from client import MockShopApiError
+
+
+def unbase58(text: str) -> bytes:
+    number = 0
+    for char in text:
+        number = number * 58 + vault._ALPHABET.index(char)
+    body = number.to_bytes((number.bit_length() + 7) // 8, "big") if number else b""
+    return b"\0" * (len(text) - len(text.lstrip("1"))) + body
 
 SHARING = {"enabled": True, "modes": ["script"], "rate_minor_per_second": 5, "idle_after_seconds": 0}
 OFFER = {"id": "service-1", "price_minor": 5, "revision": 0}
@@ -38,6 +53,12 @@ class WorkerLoopTests(ConfigDirectoryTestCase):
     def status(self):
         return json.loads((self.directory / "worker-status.json").read_text(encoding="utf-8"))
 
+    def saved(self):
+        return json.loads((self.directory / "worker.json").read_text(encoding="utf-8"))[settings.api_base_url()]
+
+    def secret(self):
+        return vault.load(settings.api_base_url())
+
     async def test_without_consent_the_worker_stops_and_contacts_nobody(self):
         for config in (None, {"sharing": {"enabled": False}}):
             with self.subTest(config=config):
@@ -59,14 +80,107 @@ class WorkerLoopTests(ConfigDirectoryTestCase):
         published = self.session.made("POST", "/api/vendor/services")[0]
         self.assertEqual((registered["role"], published["json_body"]["kind"], published["json_body"]["url"], published["json_body"]["price_minor"]),
                          ("vendor", "compute", "worker:script", 5))
-        saved = json.loads((self.directory / "worker.json").read_text(encoding="utf-8"))[settings.api_base_url()]
-        self.assertEqual((saved["username"], saved["password"], saved["offers"]), (registered["username"], registered["password"], {"script": "service-1"}))
         self.assertEqual((self.status()["state"], self.status()["offers"]), ("idle", {"script": "service-1"}))
         self.assertEqual(len(self.session.made("POST", "/api/worker/service-1/claim")), 1)
+
+    async def test_the_login_and_payout_key_live_in_the_credential_store_not_in_files(self):
+        self.write_config(sharing=SHARING)
+        await worker.Worker().run(once=True)
+        registered = self.session.made("POST", "/api/auth/register")[0]["json_body"]
+        secret = self.secret()
+        self.assertEqual((secret["username"], secret["password"]), (registered["username"], registered["password"]))
+        # The marketplace gets the address and a proof the key is ours, never the key.
+        address = vault.payout_address(secret["payout_seed"])
+        self.assertEqual(registered["payout_pubkey"], address)
+        Ed25519PublicKey.from_public_bytes(unbase58(address)).verify(
+            unbase58(registered["payout_signature"]), f"Autark payout address for {registered['username']}".encode())
+        self.assertNotIn(secret["payout_seed"], json.dumps(self.session.calls))
+        self.assertEqual(self.saved(), {"username": registered["username"], "payout_address": address, "offers": {"script": "service-1"}})
+        for file in self.directory.iterdir():
+            text = file.read_text(encoding="utf-8")
+            self.assertNotIn(secret["password"], text, file.name)
+            self.assertNotIn(secret["payout_seed"], text, file.name)
+        self.assertEqual(self.status()["payout_address"], address)
+
+    async def test_a_password_left_in_worker_json_moves_to_the_credential_store(self):
+        self.write_config(sharing=SHARING)
+        worker.write_json(self.directory / "worker.json", {settings.api_base_url(): {
+            "username": "worker-old-1", "password": "old-password-123", "offers": {"script": "service-1"}}})
+        self.session.on("POST", "/api/auth/login", {"token": "vendor-token", "user": {}})
+        self.session.on("GET", "/api/vendor/services", {"services": [OFFER]})
+        await worker.Worker().run(once=True)
+        self.assertEqual(self.session.made("POST", "/api/auth/login")[0]["json_body"], {"username": "worker-old-1", "password": "old-password-123"})
+        self.assertEqual(self.secret(), {"username": "worker-old-1", "password": "old-password-123"})
+        self.assertEqual(self.saved(), {"username": "worker-old-1", "offers": {"script": "service-1"}})
+        self.assertNotIn("old-password-123", (self.directory / "worker.json").read_text(encoding="utf-8"))
+        self.assertEqual(self.session.made("POST", "/api/auth/register"), [])
+
+    async def test_without_a_credential_store_the_worker_does_not_start(self):
+        self.write_config(sharing=SHARING)
+        keyring.set_keyring(fail.Keyring())
+        self.assertEqual(await worker.Worker().run(once=True), 1)
+        self.assertEqual(self.session.calls, [])
+        self.assertEqual(self.status()["state"], "stopped")
+        self.assertIn("credential store", self.status()["last_error"])
+        self.assertFalse((self.directory / "worker.json").exists())
+
+    async def test_a_new_account_keeps_the_key_an_earlier_one_was_paid_to(self):
+        self.write_config(sharing=SHARING)
+        await worker.Worker().run(once=True)
+        first = self.secret()
+        self.session.on("POST", "/api/auth/login", MockShopApiError(403, "This account was deactivated."))
+        (self.directory / "worker-status.json").unlink()
+        await worker.Worker().run(once=True)
+        second = self.secret()
+        self.assertNotEqual(second["username"], first["username"])
+        self.assertEqual(second["retired_payout_seeds"], [first["payout_seed"]])
+        self.assertNotEqual(second["payout_seed"], first["payout_seed"])
+
+    async def test_the_payout_key_can_be_exported_for_a_wallet(self):
+        self.write_config(sharing=SHARING)
+        await worker.Worker().run(once=True)
+        output = io.StringIO()
+        with patch.object(sys, "argv", ["worker.py", "--export-payout-key"]), redirect_stdout(output):
+            self.assertEqual(worker.main(), 0)
+        keypair = json.loads(output.getvalue())
+        self.assertEqual((len(keypair), vault.base58(bytes(keypair[32:]))), (64, self.saved()["payout_address"]))
+
+    async def test_turning_sharing_off_withdraws_the_offers(self):
+        self.write_config(sharing=SHARING)
+        await worker.Worker().run(once=True)
+        self.session.on("POST", "/api/auth/login", {"token": "vendor-token", "user": {}})
+        self.session.on("DELETE", "/api/vendor/services/service-1", {"service": {**OFFER, "archived_at": "now"}})
+        self.write_config(sharing={**SHARING, "enabled": False})
+        (self.directory / "worker-status.json").unlink()
+        self.assertEqual(await worker.Worker().run(once=True), 0)
+        self.assertEqual(len(self.session.made("DELETE", "/api/vendor/services/service-1")), 1)
+        self.assertEqual(self.saved()["offers"], {})
+        self.assertEqual(self.status()["state"], "stopped")
+
+    async def test_a_mode_no_longer_shared_is_withdrawn_and_a_withdrawn_offer_replaced(self):
+        self.write_config(sharing={**SHARING, "modes": ["agent", "script"]})
+        self.session.on("POST", "/api/vendor/services", lambda call: (201, {"service": {
+            **OFFER, "id": "service-agent" if call["json_body"]["url"] == "worker:agent" else "service-1"}}))
+        self.session.on("POST", "/api/worker/service-agent/claim", (204, {}))
+        with patch.dict(os.environ, {"AUTARK_WORKER_AGENT_COMMAND": "agent"}):
+            await worker.Worker().run(once=True)
+        self.assertEqual(self.saved()["offers"], {"agent": "service-agent", "script": "service-1"})
+        self.session.on("POST", "/api/auth/login", {"token": "vendor-token", "user": {}})
+        self.session.on("GET", "/api/vendor/services", {"services": [{**OFFER, "archived_at": "2026-10-12T10:00:00+00:00"},
+                                                                      {**OFFER, "id": "service-agent"}]})
+        self.session.on("DELETE", "/api/vendor/services/service-agent", {"service": {}})
+        self.session.on("POST", "/api/vendor/services", (201, {"service": {**OFFER, "id": "service-2"}}))
+        self.session.on("POST", "/api/worker/service-2/claim", (204, {}))
+        self.write_config(sharing=SHARING)
+        (self.directory / "worker-status.json").unlink()
+        await worker.Worker().run(once=True)
+        self.assertEqual(len(self.session.made("DELETE", "/api/vendor/services/service-agent")), 1)
+        self.assertEqual(self.saved()["offers"], {"script": "service-2"})
 
     async def test_next_start_reuses_the_account_and_reprices_the_offer(self):
         self.write_config(sharing=SHARING)
         await worker.Worker().run(once=True)
+        username = self.secret()["username"]
         self.session.on("POST", "/api/auth/login", {"token": "vendor-token-2", "user": {}})
         self.session.on("GET", "/api/vendor/services", {"services": [OFFER]})
         self.session.on("PATCH", "/api/vendor/services/service-1", {"service": {**OFFER, "price_minor": 8, "revision": 1}})
@@ -75,6 +189,7 @@ class WorkerLoopTests(ConfigDirectoryTestCase):
         await worker.Worker().run(once=True)
         self.assertEqual((len(self.session.made("POST", "/api/auth/register")), len(self.session.made("POST", "/api/vendor/services"))), (1, 1))
         self.assertEqual(self.session.made("PATCH", "/api/vendor/services/service-1")[0]["json_body"], {"revision": 0, "price_minor": 8})
+        self.assertEqual(self.session.made("POST", "/api/auth/login")[0]["json_body"]["username"], username)
 
     async def test_an_active_agent_is_not_offered(self):
         self.write_config(sharing={**SHARING, "idle_after_seconds": 120})
@@ -169,3 +284,20 @@ class TrustedHostTests(ConfigDirectoryTestCase):
                 else:
                     with self.assertRaises(settings.ConfigError):
                         settings.api_base_url()
+
+
+class OwnerOnlyFileTests(ConfigDirectoryTestCase):
+    async def test_a_private_file_is_readable_by_its_owner_only(self):
+        path = self.directory / "worker.json"
+        worker.write_json(path, {"a": 1}, private=True)
+        self.assertEqual(json.loads(path.read_text(encoding="utf-8")), {"a": 1})
+        if os.name != "nt":
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            return
+        import subprocess
+        acl = subprocess.run(["icacls", str(path)], capture_output=True, text=True, check=True).stdout
+        entries = [line.strip() for line in acl.splitlines()[:-1] if ":" in line]
+        # One explicit entry: the owner. Nothing inherited from the directory (no "(I)").
+        self.assertEqual(len(entries), 1, acl)
+        self.assertNotIn("(I)", acl)
+        self.assertIn("(F)", acl)
