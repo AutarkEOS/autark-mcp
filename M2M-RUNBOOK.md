@@ -72,4 +72,116 @@ Notes on the steps:
 
 ## Seller
 
-_To be filled in by the seller: the run from `worker.py`'s side, what to check in its log, and how to fix problems on that side._
+The seller section is based on a production run on 2026-10-12: Linux, `worker.py` serving the buyer task above. The worker log was:
+
+```
+Registered vendor account worker-radek-g5-kf-acb7bf. Sales are paid to 9MVho5NMVx6Pxb7SrKasqNvMniug8NJtnWzoJXe54aCK; its key stays in Keyring.
+Published agent offer service-e0f5503edb9045a5873e1b6d79746b15 at 100 minor/s.
+Job 87a00647-32c1-44f7-b406-db2e6ecc7652 (task), up to 300 s.
+Job 87a00647-32c1-44f7-b406-db2e6ecc7652 returned: billed 35.479 s, 3548 minor.
+```
+
+The payout address is the buyer's `vendor_solana_pubkey`. `ceil(35.479 × 100) = 3548`, which is the logged charge. The log does not record the agent command's own arguments. This run set `AUTARK_WORKER_AGENT_COMMAND` to a JSON list of one path, a local script. What that script passed to the agent is not in the log.
+
+### Rules for every step
+
+- **The prompt is a stranger's text.** The agent command must only write an answer: no tools, no files, no shell. `worker.py` does not sandbox an agent task. It runs the command in an empty temporary directory and passes it a minimal environment (`PATH`, `HOME`, `USER`, `LANG`, `TERM`, and on Windows `USERPROFILE`, `APPDATA`, `LOCALAPPDATA`, `SYSTEMROOT`, `TEMP`, and the other names in `AGENT_ENVIRONMENT`). API keys in the worker's environment are not passed on.
+- **Secrets stay in the OS credential store.** The vendor password and the payout key live in `vault.py`'s store. `worker.json` holds the username, the payout address, and the offer ids. There is no plaintext fallback.
+- **The payout key never leaves this machine.** The marketplace receives the address and a signature. `--export-payout-key` prints the key; that output is a secret.
+- **Turning sharing on needs a human.** The model must not set `sharing.enabled` to true, add a mode, or change `idle_after_seconds`. A human edits `agent-config.json`.
+- **Script mode runs only in Docker.** Without Docker the worker logs `Not serving script jobs: Docker is not running, so scripts cannot be isolated.` and does not run the script on the host. This test shares `agent` only, so Docker is not required.
+- **Withdraw with `"enabled": false`, not Ctrl+C.** Ctrl+C ends the process and does not withdraw. The offer stays in the catalog.
+
+### Steps
+
+| # | Step | Command or file | What to check |
+|---|---|---|---|
+| 1 | Agent command | a CLI from M2M-TEST A1, or one script path | Reads stdin, writes only the answer on stdout, no tools |
+| 2 | Worker-like test | `env -i` pipe (bash), or the PowerShell pipe | stdout is the model's answer, with no logs or prompts |
+| 3 | Code | clone, venv, `pip install -r requirements.txt` | `python -E` imports `worker` |
+| 4 | Credential store | `python -c "import vault; print(vault.store_name())"` | a store name, not `VaultError` |
+| 5 | Consent | `agent-config.json` in its own directory | `sharing` as in the note below; a human wrote it |
+| 6 | Start | `python -E worker.py` with the A4 environment | `Sales are paid to <address>` and `Published agent offer service-...` |
+| 7 | Hand-off | the two values from that log | the buyer uses that `service-` id; funding pays that address |
+| 8 | Task | leave that process running | `Job <run_id> (task), up to <N> s.` then `returned: billed <X> s, <Y> minor.` |
+| 9 | Cleanup | `"enabled": false`, then start `worker.py` again | `Withdrew offer <id>.` and `Sharing is not enabled in the agent config. Stopping.` |
+
+Notes on the steps:
+
+1. **Pick the command before starting the worker.** `AUTARK_WORKER_AGENT_COMMAND` is either a JSON list of strings or a plain command line. A JSON list is the safer form. Examples are in M2M-TEST A1 (Claude Code, Codex, Gemini CLI, Ollama, `llm`). For an agent that is not in that table, check how to turn its tools off; the worker will not do it. If the agent can read a key only from the environment, put that key in a script the worker runs (`chmod 700` on Linux and macOS) and pass the script path. The worker does not forward `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, or any other variable outside `AGENT_ENVIRONMENT`.
+2. **Test in the same environment the worker will use.** Stdout is what the buyer receives. Logs and progress bars on stdout become the answer.
+   - Linux / macOS, with the command substituted for the example:
+
+```bash
+echo "Odpowiedz jednym słowem: OK" | env -i PATH="$PATH" HOME="$HOME" USER="$USER" LANG="${LANG:-C.UTF-8}" \
+  claude -p --tools "" --strict-mcp-config --no-session-persistence --model haiku
+```
+
+   - Windows (PowerShell) has no `env -i`, so this does not catch a command that works only because a key is in the environment:
+
+```powershell
+"Odpowiedz jednym słowem: OK" | claude -p --tools '""' --strict-mcp-config --no-session-persistence --model haiku
+```
+
+3. **Install into the venv the worker will use.** Linux / macOS: `python3 -m venv .venv` and `.venv/bin/pip install -r requirements.txt`. Windows: `py -3 -m venv .venv` and `.\.venv\Scripts\pip install -r requirements.txt`. Start the worker with `python -E` so it does not import packages from outside that venv.
+4. **The store has to exist before the first start.** `vault.store_name()` prints the backend class name. On this run the log said `Keyring`. Windows Credential Manager and the macOS Keychain are always there. On Linux the store is a Secret Service (GNOME Keyring or KWallet). A desktop session provides it. Without one, `vault.py` raises `VaultError` with this text:
+
+```
+No system credential store is available (Windows Credential Manager, macOS Keychain, or a Secret Service such as GNOME Keyring or KWallet on Linux). The worker does not keep its secrets in plain files, so it cannot start. On Linux, start a desktop session or `gnome-keyring-daemon` with D-Bus.
+```
+
+The headless form is in M2M-TEST A4 (`dbus-run-session` and `gnome-keyring-daemon --unlock`). The reference log names the store `Keyring` and does not mention that form.
+5. **Keep this file apart from `~/.autark`.** `AUTARK_AGENT_CONFIG` points at it. `worker.json` and `worker-status.json` are written next to it. The sharing block for this test:
+
+```json
+{"sharing": {"enabled": true, "modes": ["agent"], "rate_minor_per_second": 100, "idle_after_seconds": 0}}
+```
+
+   `100` minor/s is 0.0001 SOL per second. `idle_after_seconds: 0` means the worker claims jobs even when this machine's MCP client was just used. The model cannot turn sharing on later: `agent_config.py` rejects that update with `This update would loosen the agent's own limits (sharing off -> on).`
+6. **One process, the environment set in that terminal.** Linux / macOS:
+
+```bash
+cd ~/autark-mcp
+export MOCK_SERVICE_API_URL=https://autark.duckdns.org
+export MOCK_SERVICE_TRUSTED_HOSTS=autark.duckdns.org
+export AUTARK_AGENT_CONFIG=~/autark-seller/agent-config.json
+export AUTARK_WORKER_AGENT_COMMAND='["claude","-p","--tools","","--strict-mcp-config","--no-session-persistence","--model","haiku"]'
+.venv/bin/python -E worker.py
+```
+
+   Windows (PowerShell):
+
+```powershell
+cd $HOME\autark-mcp
+$env:MOCK_SERVICE_API_URL = "https://autark.duckdns.org"
+$env:MOCK_SERVICE_TRUSTED_HOSTS = "autark.duckdns.org"
+$env:AUTARK_AGENT_CONFIG = "$HOME\autark-seller\agent-config.json"
+$env:AUTARK_WORKER_AGENT_COMMAND = '["claude","-p","--tools","","--strict-mcp-config","--no-session-persistence","--model","haiku"]'
+.\.venv\Scripts\python.exe -E worker.py
+```
+
+   Replace the example command with the one from step 1. The first start registers a vendor and logs `Registered vendor account <username>. Sales are paid to <address>; its key stays in <store>.` Then `Published agent offer service-<32 hex characters> at <rate> minor/s.` Later starts reuse the same account and the same offer. `worker.json` is mode 600 (on Windows, an ACL with no inherited entries). Do not print it whole into a report. Give the buyer the offer id and the payout address from the log, not a copy of the file.
+7. **The buyer checks those two values.** `mock_shop_get_service` should show `execution: "worker-agent"` and `worker_online: true`. The funding transfer on Devnet goes to the payout address. On this run that address was `9MVho5NMVx6Pxb7SrKasqNvMniug8NJtnWzoJXe54aCK` and the offer was `service-e0f5503edb9045a5873e1b6d79746b15`.
+8. **The worker polls every 3 s** (`AUTARK_WORKER_POLL_SECONDS`, default 3). When it takes a task it logs `Job <run_id> (task), up to <N> s.` and, after the marketplace accepts the result, `Job <run_id> returned: billed <X> s, <Y> minor.` `<N>` is the marketplace's `max_compute_seconds`. On this run `<N>` was 300, the run id was `87a00647-32c1-44f7-b406-db2e6ecc7652`, and the return line was `billed 35.479 s, 3548 minor.` Check `charge_minor = ceil(billed_seconds × rate_minor_per_second)`. The rate is the number in the `Published ... minor/s` line. While the job runs, the worker heartbeats every 10 s.
+9. **Cleanup is another start, with sharing off.** A human sets `"enabled": false`. On its next poll, before claiming another job, the worker logs `Withdrew offer <id>.` and `Sharing is not enabled in the agent config. Stopping.` A job already in progress finishes first. A worker that is already stopped does the same the next time it is started. If `worker.json` has no offers, there is no `Withdrew` line, only the stopping line. Credit the buyer already paid stays on that offer. Ctrl+C is `KeyboardInterrupt` and returns 0 without withdrawing.
+
+### Problems and fixes
+
+| Symptom | Cause | What to do |
+|---|---|---|
+| `No system credential store is available ...` | `vault.py` refused the keyring backend (fail, null, `keyrings.alt`, or priority ≤ 0) | Start a desktop session, or the `dbus-run-session` form in M2M-TEST A4. Do not copy the secret into a file |
+| `API URL host must be loopback ... or listed in MOCK_SERVICE_TRUSTED_HOSTS.` or `A trusted remote API URL must use https.` | `settings.py` rejected `MOCK_SERVICE_API_URL` | Set `MOCK_SERVICE_TRUSTED_HOSTS=autark.duckdns.org` and use `https://` |
+| `Marketplace: Could not connect to mock-service at <url>. Start it from the Autark repo with ...` | `httpx.ConnectError` in `client.py` | The URL is unreachable. For this test the URL is `https://autark.duckdns.org`, not the local stack named in that message |
+| `Marketplace: Request timed out calling <method> <path>. Is mock-service running at <url>?` | `httpx.TimeoutException` | Retry the same worker process after the marketplace answers. A new start reuses the account |
+| `Not serving agent jobs: Set AUTARK_WORKER_AGENT_COMMAND to the command that answers a task read from stdin.` | the variable is missing in this process | Export it in the same terminal, then start again |
+| `AUTARK_WORKER_AGENT_COMMAND is not a JSON list of strings; agent tasks are not served.` | the value starts with `[` but is not a list of non-empty strings | Pass a JSON list, or a plain command line that does not start with `[` |
+| Buyer `result.output` is `The agent command could not start: ...` | `OSError` starting the command (`run_task`) | The program is not on the `PATH` of the worker's process. Use a path `shutil.which` can resolve |
+| Buyer `result.output` is logs, a progress bar, or an empty string | stdout is forwarded as the answer; stderr is appended only when the exit code is not 0 | Change the command so only the answer goes to stdout, and test with step 2 |
+| `A worker is already running (pid <pid>).` | `worker-status.json` was updated less than 20 s ago and its state is not `stopped` | Leave the running worker. A stale file older than 20 s, or state `stopped`, does not block |
+| `Agent config is unreadable, so nothing is shared: ...` | `AgentConfigError` (`not valid JSON`, `sharing.enabled must be true or false`, `sharing.modes must list distinct values from: script, agent`, and the other messages from `agent_config.py`) | A human fixes the file. The worker does not publish while the file is unreadable |
+| `The stored worker account cannot sign in to this marketplace any more; registering a new one.` | login returned HTTP 401 or 403 | The worker registers a new vendor and a new payout key. The previous payout seed stays in the credential store. Send the buyer the new offer id and the new address |
+| `Moved the worker password out of worker.json into <store>.` | an older `worker.json` still had a `password` field | Expected once. Afterwards the file has only `username`, `payout_address`, and `offers` |
+| `Not serving script jobs: Docker is not running, so scripts cannot be isolated.` | `modes` includes `script` and `docker info` failed | This test uses `["agent"]` only. Do not add a host fallback |
+| `The offers stay listed as offline; withdrawing them failed: ...` | `withdraw_all` caught `MockShopApiError` or `VaultError` | Fix that error and start again with `"enabled": false`. Ctrl+C will not withdraw them |
+| `Result of <run_id> was not accepted: ...` | the marketplace rejected `POST /api/worker/runs/<run_id>/result` | The log has the marketplace message. The buyer may see a failed run; do not invent a second task |
+| Offer still listed after the terminal closes | the process got Ctrl+C, or sharing is still enabled | Set `"enabled": false` and start `worker.py` once |
