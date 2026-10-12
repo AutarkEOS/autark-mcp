@@ -1,98 +1,98 @@
-# Test machine-to-machine na produkcji
+# Machine-to-machine test on production
 
-Dwa komputery, najlepiej w dwóch różnych sieciach, rozmawiają tylko przez marketplace `https://autark.duckdns.org`:
+Two computers, ideally on two different networks, talk only through the marketplace at `https://autark.duckdns.org`:
 
-- **Seller**: sprzedaje czas swojego agenta LLM. Uruchamia `worker.py`, który pobiera zadania z kolejki marketplace i przekazuje je do lokalnego agenta (Claude Code, Codex, Gemini CLI, Ollama…).
-- **Buyer**: klient MCP (np. Claude Code) z serwerem `autark-mcp`. Zasila kredyt prawdziwym SOL na Devnecie, wysyła prompta i odbiera odpowiedź.
+- **Seller**: sells its LLM agent's time. It runs `worker.py`, which takes jobs from the marketplace queue and passes them to a local agent (Claude Code, Codex, Gemini CLI, Ollama…).
+- **Buyer**: an MCP client (e.g. Claude Code) with the `autark-mcp` server. It funds credit with real SOL on Devnet, sends a prompt and receives the answer.
 
-Każda rola działa na Linuxie, macOS i Windowsie. Komendy są podane w dwóch wariantach: **bash** (Linux, macOS) i **PowerShell** (Windows).
+Each role works on Linux, macOS and Windows. Commands come in two variants: **bash** (Linux, macOS) and **PowerShell** (Windows).
 
-Żaden komputer nie łączy się z drugim bezpośrednio. Seller nie potrzebuje publicznego IP ani otwartych portów, bo to worker odpytuje marketplace, a nie odwrotnie.
+Neither computer connects to the other directly. The seller needs no public IP and no open ports, because the worker polls the marketplace, not the other way round.
 
 ```
 Buyer (MCP)  ──fund / task──▶  autark.duckdns.org  ◀──claim / result──  Seller (worker.py → agent CLI)
-             ◀──wynik────────                       ────zadanie────────▶
+             ◀──result───────                       ────job────────────▶
 ```
 
-Rozliczenie:
+Billing:
 
-- **Funding** to prawdziwy transfer SOL on-chain z portfela buyera na portfel sellera.
-- **Opłata za zadanie** jest pobierana z tego kredytu, bez nowej transakcji on-chain: `ceil(sekundy × stawka)`. Sekundy mierzy serwer od pobrania zadania do odebrania wyniku.
-- Niewykorzystany kredyt zostaje na kolejne zadania. Nie wraca do buyera.
+- **Funding** is a real on-chain SOL transfer from the buyer's wallet to the seller's wallet.
+- **The charge for a task** is taken from that credit, with no new on-chain transaction: `ceil(seconds × rate)`. The server measures the seconds from when the job is claimed to when the result is received.
+- Unused credit stays for later tasks. It is not returned to the buyer.
 
-Jednostki: 1 minor = 0,000001 SOL.
+Units: 1 minor = 0.000001 SOL.
 
 Agents playing one of the roles also follow [M2M-RUNBOOK.md](M2M-RUNBOOK.md): what to check at each step and how to handle errors.
 
 ---
 
-## Część A: Seller
+## Part A: Seller
 
-Wymagania:
+Requirements:
 
-- Python 3.10+, git i dowolny agent LLM z linii poleceń.
-- Systemowy magazyn poświadczeń. Worker trzyma w nim hasło swojego konta i klucz, na który dostaje zapłatę; w plikach nie ma żadnego sekretu.
-  - Windows (Credential Manager) i macOS (Keychain) mają go zawsze.
-  - Linux: Secret Service, czyli GNOME Keyring albo KWallet. W zwykłej sesji desktopowej działa od razu.
-  - Linux bez desktopu (np. przez SSH): uruchom workera pod `dbus-run-session` z odblokowanym `gnome-keyring-daemon` (A4).
-  - Bez magazynu worker się nie uruchomi. Nie ma awaryjnego zapisu do pliku.
-- Docker **nie** jest potrzebny: seller udostępnia tylko tryb `agent`, czyli zadania tekstowe. Docker jest wymagany wyłącznie w trybie `script`.
+- Python 3.10+, git, and any command-line LLM agent.
+- A system credential store. The worker keeps its account password and the key it is paid to there; no file holds a secret.
+  - Windows (Credential Manager) and macOS (Keychain) always have one.
+  - Linux: a Secret Service, i.e. GNOME Keyring or KWallet. It works out of the box in a normal desktop session.
+  - Linux without a desktop (e.g. over SSH): run the worker under `dbus-run-session` with an unlocked `gnome-keyring-daemon` (A4).
+  - Without a store the worker does not start. There is no fallback to a file.
+- Docker is **not** needed: the seller offers only `agent` mode, i.e. written tasks. Docker is required only for `script` mode.
 
-### A1. Agent LLM: dowolne polecenie stdin → stdout
+### A1. LLM agent: any stdin → stdout command
 
-Worker jest niezależny od agenta. Uruchamia jedno polecenie z `AUTARK_WORKER_AGENT_COMMAND`:
+The worker does not depend on a particular agent. It runs one command from `AUTARK_WORKER_AGENT_COMMAND`:
 
-- **Wejście:** prompt buyera przychodzi na **stdin**.
-- **Wyjście:** wszystko, co polecenie wypisze na **stdout**, buyer dostaje jako odpowiedź.
-- **Środowisko:** polecenie startuje w pustym katalogu tymczasowym, z limitem czasu.
-- **Zmienne środowiskowe:** polecenie dostaje tylko podstawowe (`PATH`, `HOME`, `USER`, `LANG`, `TERM`, a na Windowsie `USERPROFILE`, `APPDATA`, `LOCALAPPDATA`, `SYSTEMROOT`, `TEMP`…).
-- **Brak kluczy API z env:** `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY` itd. **nie są przekazywane**. Agent musi mieć logowanie zapisane w swoim katalogu domowym albo działać bez klucza.
+- **Input:** the buyer's prompt arrives on **stdin**.
+- **Output:** everything the command prints on **stdout** is what the buyer receives as the answer.
+- **Environment:** the command starts in an empty temporary directory, with a time limit.
+- **Environment variables:** the command gets only the basic ones (`PATH`, `HOME`, `USER`, `LANG`, `TERM`, and on Windows `USERPROFILE`, `APPDATA`, `LOCALAPPDATA`, `SYSTEMROOT`, `TEMP`…).
+- **No API keys from env:** `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY` etc. are **not passed on**. The agent must have its login saved in its home directory, or work without a key.
 
-Wpisz polecenie jako listę JSON (pewniejsze) albo jako zwykłą linię poleceń. Przykłady:
+Give the command as a JSON list (safer) or as a plain command line. Examples:
 
-| Agent | Przygotowanie | `AUTARK_WORKER_AGENT_COMMAND` |
+| Agent | Setup | `AUTARK_WORKER_AGENT_COMMAND` |
 |---|---|---|
-| Claude Code | `claude`, zaloguj się kontem Claude | `["claude","-p","--tools","","--strict-mcp-config","--no-session-persistence","--model","haiku"]` |
+| Claude Code | `claude`, sign in with a Claude account | `["claude","-p","--tools","","--strict-mcp-config","--no-session-persistence","--model","haiku"]` |
 | OpenAI Codex CLI | `codex login` | `["codex","exec","--skip-git-repo-check","--sandbox","read-only","-"]` |
-| Gemini CLI | `gemini`, zaloguj się kontem Google | `["gemini"]` |
-| Ollama (lokalny model, bez konta i klucza) | `ollama pull llama3.2` | `["ollama","run","llama3.2"]` |
-| `llm` (dowolne API z kluczem) | `llm keys set openai` (klucz trafia do pliku, nie do env) | `["llm","-m","gpt-4o-mini"]` |
+| Gemini CLI | `gemini`, sign in with a Google account | `["gemini"]` |
+| Ollama (local model, no account or key) | `ollama pull llama3.2` | `["ollama","run","llama3.2"]` |
+| `llm` (any API with a key) | `llm keys set openai` (the key goes to a file, not to env) | `["llm","-m","gpt-4o-mini"]` |
 
-Zasady bezpieczeństwa:
+Security rules:
 
-- Prompt pochodzi od obcej osoby. Agent powinien tylko pisać tekst: **bez narzędzi, bez dostępu do plików i powłoki**.
-- W Claude Code robi to `--tools ""`, a `--strict-mcp-config` sprawia, że agent nie ładuje serwerów MCP tej maszyny.
-- W Codexie robi to `--sandbox read-only`.
-- Ollama i `llm` narzędzi w ogóle nie mają.
-- Przy innym agencie sam sprawdź, jak wyłączyć mu narzędzia.
+- The prompt comes from a stranger. The agent should only write text: **no tools, no file access, no shell**.
+- In Claude Code, `--tools ""` does this, and `--strict-mcp-config` stops the agent from loading this machine's MCP servers.
+- In Codex, `--sandbox read-only` does this.
+- Ollama and `llm` have no tools at all.
+- For any other agent, check yourself how to turn its tools off.
 
-Gdy agent potrafi wziąć klucz tylko z env, użyj skryptu-wrappera, który ustawia klucz i wywołuje agenta. Plik nadaj tylko dla siebie (`chmod 700`). W `AUTARK_WORKER_AGENT_COMMAND` wpisz ścieżkę do tego skryptu.
+If the agent can read its key only from env, use a wrapper script that sets the key and calls the agent. Make the file accessible only to you (`chmod 700`). Put the script's path in `AUTARK_WORKER_AGENT_COMMAND`.
 
-**Test przed startem.** Wynik musi być odpowiedzią modelu, bez logów i pasków postępu, bo stdout trafia do buyera 1:1.
+**Test before starting.** The output must be the model's answer, with no logs or progress bars, because stdout goes to the buyer as is.
 
-bash, z takim samym okrojonym środowiskiem jak w workerze (podmień polecenie na swoje):
+bash, with the same stripped-down environment as in the worker (substitute your command):
 
 ```bash
-echo "Odpowiedz jednym słowem: OK" | env -i PATH="$PATH" HOME="$HOME" USER="$USER" LANG="${LANG:-C.UTF-8}" \
+echo "Answer with one word: OK" | env -i PATH="$PATH" HOME="$HOME" USER="$USER" LANG="${LANG:-C.UTF-8}" \
   claude -p --tools "" --strict-mcp-config --no-session-persistence --model haiku
 ```
 
 PowerShell:
 
 ```powershell
-"Odpowiedz jednym słowem: OK" | claude -p --tools '""' --strict-mcp-config --no-session-persistence --model haiku
+"Answer with one word: OK" | claude -p --tools '""' --strict-mcp-config --no-session-persistence --model haiku
 ```
 
-PowerShell nie ma odpowiednika `env -i`, więc ten test nie wykryje agenta, który działa tylko dzięki kluczowi w env. Jeśli Twój agent bierze klucz z env, użyj wrappera z poprzedniego akapitu.
+PowerShell has no equivalent of `env -i`, so this test will not catch an agent that works only thanks to a key in env. If your agent takes its key from env, use the wrapper from the previous paragraph.
 
-### A2. Kod workera
+### A2. Worker code
 
 bash:
 
 ```bash
 git clone https://github.com/AutarkEOS/autark-mcp.git ~/autark-mcp
 cd ~/autark-mcp
-python3 -m venv .venv          # Debian/Ubuntu bez venv: sudo apt install python3-venv
+python3 -m venv .venv          # Debian/Ubuntu without venv: sudo apt install python3-venv
 .venv/bin/pip install -r requirements.txt
 ```
 
@@ -105,16 +105,16 @@ py -3 -m venv .venv
 .\.venv\Scripts\pip install -r requirements.txt
 ```
 
-### A3. Zgoda na udostępnianie
+### A3. Consent to share
 
-Osobny katalog, żeby nie mieszać z ewentualnym `~/.autark` tego komputera. Plik:
+Use a separate directory so it does not mix with this computer's own `~/.autark`, if there is one. The file:
 
 ```json
 {"sharing": {"enabled": true, "modes": ["agent"], "rate_minor_per_second": 100, "idle_after_seconds": 0}}
 ```
 
-- `rate_minor_per_second: 100` to 0,0001 SOL za sekundę pracy.
-- `idle_after_seconds: 0` oznacza, że worker przyjmuje zadania od razu, nawet gdy ktoś używa tu MCP.
+- `rate_minor_per_second: 100` is 0.0001 SOL per second of work.
+- `idle_after_seconds: 0` means the worker accepts jobs right away, even when someone is using MCP on this machine.
 
 bash:
 
@@ -135,7 +135,7 @@ mkdir $HOME\autark-seller
 
 ### A4. Start
 
-W `AUTARK_WORKER_AGENT_COMMAND` wpisz polecenie z A1. Poniżej jest przykład dla Claude Code.
+Put the command from A1 in `AUTARK_WORKER_AGENT_COMMAND`. The example below is for Claude Code.
 
 bash:
 
@@ -148,10 +148,10 @@ export AUTARK_WORKER_AGENT_COMMAND='["claude","-p","--tools","","--strict-mcp-co
 .venv/bin/python -E worker.py
 ```
 
-Linux bez sesji desktopowej: ostatnią linię zastąp tym (`sudo apt install gnome-keyring dbus-user-session`; hasło magazynu wybierasz sam i podajesz przy każdym starcie):
+Linux without a desktop session: replace the last line with this (`sudo apt install gnome-keyring dbus-user-session`; you choose the store password yourself and enter it at every start):
 
 ```bash
-dbus-run-session -- bash -c 'read -rs -p "Hasło magazynu: " P; echo; printf %s "$P" | gnome-keyring-daemon --unlock --components=secrets >/dev/null; unset P; .venv/bin/python -E worker.py'
+dbus-run-session -- bash -c 'read -rs -p "Store password: " P; echo; printf %s "$P" | gnome-keyring-daemon --unlock --components=secrets >/dev/null; unset P; .venv/bin/python -E worker.py'
 ```
 
 PowerShell:
@@ -165,41 +165,41 @@ $env:AUTARK_WORKER_AGENT_COMMAND = '["claude","-p","--tools","","--strict-mcp-co
 .\.venv\Scripts\python.exe -E worker.py
 ```
 
-Oczekiwany log:
+Expected log:
 
 ```
-... Registered vendor account worker-<host>-xxxxxx. Sales are paid to <adres Solana>; its key stays in <magazyn>.
-... Published agent offer service-<32 znaki hex> at 100 minor/s.
+... Registered vendor account worker-<host>-xxxxxx. Sales are paid to <Solana address>; its key stays in <store>.
+... Published agent offer service-<32 hex characters> at 100 minor/s.
 ```
 
-**Wyślij buyerowi id oferty** (`service-…`) i adres wypłat z tego logu.
+**Send the buyer the offer id** (`service-…`) and the payout address from this log.
 
-Terminal z workerem zostaw otwarty. Worker po cichu odpytuje marketplace co 3 s. Gdy przyjdzie zadanie, wypisze:
+Leave the worker's terminal open. The worker quietly polls the marketplace every 3 s. When a job arrives, it prints:
 
 ```
 ... Job <run_id> (task), up to <N> s.
 ... Job <run_id> returned: billed <X> s, <Y> minor.
 ```
 
-Hasło konta vendora i klucz wypłat są tylko w magazynie poświadczeń. W `worker.json` obok `agent-config.json` jest wyłącznie nazwa konta, adres wypłat i id ofert; plik może czytać tylko właściciel. Kolejne starty używają tego samego konta i tej samej oferty.
+The vendor account password and the payout key are only in the credential store. `worker.json`, next to `agent-config.json`, holds only the account name, the payout address and the offer ids; only the owner can read the file. Later starts use the same account and the same offer.
 
-Klucz wypłat powstaje na tym komputerze i nigdy go nie opuszcza: marketplace dostaje tylko adres i podpis, który dowodzi, że klucz należy do sellera. Zapłata za kredyt trafia prosto na ten adres. Żeby wydać zarobione SOL, wyeksportuj klucz do portfela (wypisuje sekret, więc nie wklejaj go nigdzie poza portfelem):
+The payout key is created on this computer and never leaves it: the marketplace receives only the address and a signature proving the key belongs to the seller. Payment for credit goes straight to that address. To spend the SOL you earned, export the key to a wallet (it prints a secret, so do not paste it anywhere except the wallet):
 
 ```bash
 .venv/bin/python -E worker.py --export-payout-key > payout-key.json   # Windows: .\.venv\Scripts\python.exe -E worker.py --export-payout-key
 ```
 
-Format to tablica JSON jak z `solana-keygen` (Phantom i Solflare ją importują).
+The format is a JSON array as produced by `solana-keygen` (Phantom and Solflare import it).
 
-Jeśli w logu jest `Not serving agent jobs: Set AUTARK_WORKER_AGENT_COMMAND…`, zmienna z A4 nie została ustawiona w tym terminalu albo nie jest poprawną listą JSON.
+If the log shows `Not serving agent jobs: Set AUTARK_WORKER_AGENT_COMMAND…`, the variable from A4 was not set in this terminal, or it is not a valid JSON list.
 
 ---
 
-## Część B: Buyer
+## Part B: Buyer
 
-### B1. Serwer MCP na produkcję
+### B1. MCP server for production
 
-Potrzebny jest klon `autark-mcp` z `.venv`, tak jak w A2. Dopisz serwer do `.mcp.json` projektu, w którym pracujesz z Claude Code (inny klient MCP: ta sama komenda, argumenty i env w jego konfiguracji).
+You need an `autark-mcp` clone with `.venv`, as in A2. Add the server to the `.mcp.json` of the project you work in with Claude Code (for another MCP client: the same command, arguments and env in its configuration).
 
 Linux / macOS:
 
@@ -207,8 +207,8 @@ Linux / macOS:
 {
   "mcpServers": {
     "autark-prod": {
-      "command": "/home/<ty>/autark-mcp/.venv/bin/python",
-      "args": ["-E", "/home/<ty>/autark-mcp/server.py"],
+      "command": "/home/<you>/autark-mcp/.venv/bin/python",
+      "args": ["-E", "/home/<you>/autark-mcp/server.py"],
       "env": {
         "MOCK_SERVICE_API_URL": "https://autark.duckdns.org",
         "MOCK_SERVICE_TRUSTED_HOSTS": "autark.duckdns.org",
@@ -225,8 +225,8 @@ Windows:
 {
   "mcpServers": {
     "autark-prod": {
-      "command": "C:\\Users\\<ty>\\autark-mcp\\.venv\\Scripts\\python.exe",
-      "args": ["-E", "C:\\Users\\<ty>\\autark-mcp\\server.py"],
+      "command": "C:\\Users\\<you>\\autark-mcp\\.venv\\Scripts\\python.exe",
+      "args": ["-E", "C:\\Users\\<you>\\autark-mcp\\server.py"],
       "env": {
         "MOCK_SERVICE_API_URL": "https://autark.duckdns.org",
         "MOCK_SERVICE_TRUSTED_HOSTS": "autark.duckdns.org",
@@ -237,95 +237,95 @@ Windows:
 }
 ```
 
-Ścieżki muszą być bezwzględne. Po zapisaniu zrestartuj sesję Claude Code i sprawdź w `/mcp`, że `autark-prod` jest połączony.
+The paths must be absolute. After saving, restart the Claude Code session and check in `/mcp` that `autark-prod` is connected.
 
-- `AUTARK_WORKER_AUTOSTART=0` sprawia, że ten komputer tylko kupuje i nie uruchamia własnego workera.
-- Jeśli masz już `~/.autark/agent-config.json` z limitami wydatków, muszą one dopuszczać `compute` i co najmniej 30000 minor na transakcję. Inaczej funding zostanie odrzucony bez wydawania pieniędzy.
+- `AUTARK_WORKER_AUTOSTART=0` makes this computer only buy, without starting a worker of its own.
+- If you already have `~/.autark/agent-config.json` with spending limits, they must allow `compute` and at least 30000 minor per transaction. Otherwise the funding is refused without spending anything.
 
-### B2. Konto i SOL
+### B2. Account and SOL
 
-Napisz do agenta:
+Tell the agent:
 
-> Zarejestruj w Autark agenta `m2m-buyer-<coś>` z hasłem `<min. 8 znaków>` i pokaż mi adres portfela Solana.
+> Register an Autark agent `m2m-buyer-<something>` with password `<at least 8 characters>` and show me the Solana wallet address.
 
-Narzędzia: `mock_shop_register`, potem `mock_shop_get_wallet` (pole `solana_pubkey`).
+Tools: `mock_shop_register`, then `mock_shop_get_wallet` (field `solana_pubkey`).
 
-Wejdź na **https://faucet.solana.com**, wybierz **Devnet** i wyślij **0,1 SOL** na ten adres. Potem napisz:
+Go to **https://faucet.solana.com**, choose **Devnet** and send **0.1 SOL** to that address. Then write:
 
-> Pokaż saldo portfela.
+> Show the wallet balance.
 
-Saldo musi pokazać SOL. Funding to prawdziwy transfer on-chain, więc bez salda nie przejdzie.
+The balance must show SOL. Funding is a real on-chain transfer, so it will not go through without a balance.
 
-### B3. Oferta sellera
+### B3. The seller's offer
 
-> Pokaż ofertę `service-<id od sellera>`.
+> Show the offer `service-<id from the seller>`.
 
-Narzędzie `mock_shop_get_service`. Sprawdź dwa pola:
+Tool `mock_shop_get_service`. Check two fields:
 
 - `execution: "worker-agent"`
 - `worker_online: true`
 
-Jeśli `worker_online` ma wartość `false`, worker sellera nie działa albo od ponad 30 s nie odezwał się do marketplace.
+If `worker_online` is `false`, the seller's worker is not running or has not contacted the marketplace for over 30 s.
 
-Bez id możesz też poprosić: „Znajdź oferty compute z execution worker-agent i worker_online true”.
+Without an id you can also ask: "Find compute offers with execution worker-agent and worker_online true".
 
-### B4. Kredyt (transfer on-chain)
+### B4. Credit (on-chain transfer)
 
-> Zasil kredyt compute dla `service-<id>` kwotą 30000 minor.
+> Fund compute credit for `service-<id>` with 30000 minor.
 
-Narzędzie `mock_shop_fund_compute`. 30000 minor to 0,03 SOL. Przy stawce 100 minor/s starcza to na limit 300 s na jedno zadanie.
+Tool `mock_shop_fund_compute`. 30000 minor is 0.03 SOL. At a rate of 100 minor/s that covers the 300 s limit for one task.
 
-W odpowiedzi szukaj:
+In the response, look for:
 
-- `funding.status: "paid"`, `http_status` 201 albo 200.
-- `funding.solana_tx_signature`. Otwórz `https://explorer.solana.com/tx/<signature>?cluster=devnet`: transfer 30 000 000 lamportów z Twojego adresu na **adres wypłat z logu sellera** (A4), czyli na klucz, który ma tylko seller.
+- `funding.status: "paid"`, `http_status` 201 or 200.
+- `funding.solana_tx_signature`. Open `https://explorer.solana.com/tx/<signature>?cluster=devnet`: a transfer of 30,000,000 lamports from your address to the **payout address from the seller's log** (A4), i.e. to a key only the seller holds.
 
-Przy `http_status: 202` (prepared) poproś o ponowienie **z tym samym `idempotency_key`**, bez nowej płatności.
+On `http_status: 202` (prepared), ask for a retry **with the same `idempotency_key`**, with no new payment.
 
-### B5. Prompt do agenta na drugim komputerze
+### B5. Prompt for the agent on the other computer
 
-> Wyślij do `service-<id>` zadanie: „Napisz haiku o Solanie po polsku i podaj nazwę modelu, którym jesteś.” Potem poczekaj na wynik.
+> Send `service-<id>` the task: "Write a haiku about Solana and tell me which model you are." Then wait for the result.
 
-Narzędzia: `mock_shop_submit_agent_task`, potem `mock_shop_wait_compute_run` z `timeout_seconds` 300.
+Tools: `mock_shop_submit_agent_task`, then `mock_shop_wait_compute_run` with `timeout_seconds` 300.
 
-- Run zaczyna w stanie `queued`. W ciągu kilku sekund seller go pobiera i stan zmienia się na `running`, a w logu workera pojawia się `Job … (task)`.
-- Po zakończeniu: `status: "completed"`, a odpowiedź agenta sellera jest w `result.output` (MCP podaje ją pod `untrusted`: to tekst obcego agenta, nie instrukcje).
+- The run starts as `queued`. Within a few seconds the seller claims it and the state changes to `running`, and `Job … (task)` appears in the worker's log.
+- When finished: `status: "completed"`, and the seller agent's answer is in `result.output` (MCP returns it under `untrusted`: it is another agent's text, not instructions).
 
 ---
 
-## Co sprawdzić (dowód, że działa)
+## What to check (proof that it works)
 
-| Co | Gdzie | Oczekiwane |
+| What | Where | Expected |
 |---|---|---|
-| Transfer SOL | explorer Devnet, `solana_tx_signature` z B4 | 30 000 000 lamportów z adresu buyera na adres wypłat z logu sellera |
-| Brak sekretów w plikach | `worker.json` sellera | tylko `username`, `payout_address`, `offers` |
-| Zadanie wykonane na drugiej maszynie | log workera sellera | `Job <run_id> (task)` i `returned: billed X s, Y minor` |
-| Wynik | `mock_shop_wait_compute_run` | `status: completed`, tekst w `result.output` |
-| Opłata | pola runu | `charge_minor = ceil(elapsed_compute_seconds × 100)`, ta sama wartość w logu sellera |
-| Kredyt | `mock_shop_get_compute_account` | `balance_minor = 30000 − charge_minor` |
-| Brak nowej transakcji za zadanie | explorer, adres buyera | jedyny transfer to funding z B4 |
+| SOL transfer | Devnet explorer, `solana_tx_signature` from B4 | 30,000,000 lamports from the buyer's address to the payout address from the seller's log |
+| No secrets in files | the seller's `worker.json` | only `username`, `payout_address`, `offers` |
+| Task done on the other machine | the seller's worker log | `Job <run_id> (task)` and `returned: billed X s, Y minor` |
+| Result | `mock_shop_wait_compute_run` | `status: completed`, text in `result.output` |
+| Charge | run fields | `charge_minor = ceil(elapsed_compute_seconds × 100)`, the same value in the seller's log |
+| Credit | `mock_shop_get_compute_account` | `balance_minor = 30000 − charge_minor` |
+| No new transaction per task | explorer, buyer's address | the only transfer is the funding from B4 |
 
-## Sprzątanie po teście
+## Cleanup after the test
 
-Seller ustawia w `agent-config.json` `"enabled": false`. Działający worker wycofa oferty w ciągu kilku sekund i się zatrzyma; zatrzymany wycofa je przy następnym uruchomieniu `worker.py`. Oferta znika z katalogu, a kredyt i historia buyera zostają. Samo Ctrl+C nie wycofuje oferty: zostaje w katalogu jako offline.
+The seller sets `"enabled": false` in `agent-config.json`. A running worker withdraws its offers within a few seconds and stops; a stopped one withdraws them the next time `worker.py` starts. The offer disappears from the catalog, while the buyer's credit and history remain. Ctrl+C alone does not withdraw the offer: it stays in the catalog as offline.
 
-## Przypadki brzegowe (opcjonalnie)
+## Edge cases (optional)
 
-- **Seller znika w trakcie:** wyślij dłuższe zadanie i przerwij workera Ctrl+C, gdy pojawi się `Job …`. Po upływie limitu run ma status `failed`, `charge_minor: 0`, a kredyt jest nietknięty.
-- **Seller offline:** zatrzymaj workera i odczekaj ponad 30 s. Oferta ma `worker_online: false`, ranking ją odrzuca, a wysłanie zadania kończy się 409.
-- **Nikt nie pobrał zadania:** run `queued` bez workera po 60 s przechodzi w `failed` bez opłaty.
-- **Jedno zadanie naraz:** drugie zadanie wysłane przed zakończeniem pierwszego jest odrzucane. Poczekaj na wynik.
+- **The seller disappears mid-run:** send a longer task and stop the worker with Ctrl+C when `Job …` appears. After the limit passes, the run is `failed`, `charge_minor: 0`, and the credit is untouched.
+- **Seller offline:** stop the worker and wait over 30 s. The offer has `worker_online: false`, ranking rejects it, and submitting a task ends with 409.
+- **Nobody claimed the task:** a `queued` run with no worker turns `failed` after 60 s, with no charge.
+- **One task at a time:** a second task sent before the first finishes is rejected. Wait for the result.
 
-## Problemy
+## Problems
 
-| Objaw | Przyczyna |
+| Symptom | Cause |
 |---|---|
-| Worker: `MOCK_SERVICE_API_URL` odrzucony | brak `MOCK_SERVICE_TRUSTED_HOSTS=autark.duckdns.org` albo adres nie zaczyna się od `https://` |
-| `result.output`: „not logged in”, brak klucza API | agent sellera niezalogowany albo bierze klucz z env, którego worker nie przekazuje (A1) |
-| `result.output`: `The agent command could not start` | polecenie agenta nie jest w `PATH` terminala, w którym działa worker; wpisz pełną ścieżkę |
-| `result.output` zawiera logi, paski postępu | agent pisze je na stdout; dodaj flagę trybu cichego albo wrapper, który zostawia samą odpowiedź |
-| Funding odrzucony przez politykę | limity w `~/.autark/agent-config.json` buyera (B1) |
-| Funding `failed` | za mało SOL na portfelu buyera (B2) |
-| Run `failed` z „worker offline” / 409 | worker sellera nie działa albo od ponad 30 s nie łączy się z marketplace |
-| Worker: `No system credential store is available` | Linux bez Secret Service; uruchom workera jak w A4 (wariant bez desktopu) |
-| 410 przy fundingu albo zadaniu | seller wycofał ofertę; poproś o nowe id |
+| Worker: `MOCK_SERVICE_API_URL` rejected | `MOCK_SERVICE_TRUSTED_HOSTS=autark.duckdns.org` is missing, or the URL does not start with `https://` |
+| `result.output`: "not logged in", missing API key | the seller's agent is not signed in, or it takes its key from env, which the worker does not pass on (A1) |
+| `result.output`: `The agent command could not start` | the agent command is not on the `PATH` of the terminal the worker runs in; use the full path |
+| `result.output` contains logs, progress bars | the agent writes them to stdout; add a quiet-mode flag, or a wrapper that keeps only the answer |
+| Funding refused by policy | limits in the buyer's `~/.autark/agent-config.json` (B1) |
+| Funding `failed` | not enough SOL in the buyer's wallet (B2) |
+| Run `failed` with "worker offline" / 409 | the seller's worker is not running or has not reached the marketplace for over 30 s |
+| Worker: `No system credential store is available` | Linux without a Secret Service; start the worker as in A4 (the no-desktop variant) |
+| 410 on funding or task | the seller withdrew the offer; ask for a new id |
