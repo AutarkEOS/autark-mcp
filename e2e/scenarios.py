@@ -303,6 +303,11 @@ async def worker(api_url: str, config_dir: Path, check: Checks) -> None:
         check("the offers hide how they are reached", all("url" not in offer and offer["price_minor"] == 5 for offer in offers.values()))
         ranked = await call("mock_shop_rank_services", service_ids=[script])
         check("ranking accepts an online worker", ranked["decision"]["winner"]["service_id"] == script)
+        saved = json.loads((seller_dir / "worker.json").read_text(encoding="utf-8"))[api_url]
+        vendors = httpx.get(api_url + "/api/vendors", timeout=10).json()["vendors"]
+        check("sales go to a payout key the seller made, and worker.json holds no secret",
+              saved.get("payout_address") in [vendor["solana_pubkey"] for vendor in vendors] and set(saved) == {"username", "payout_address", "offers"},
+              str(sorted(saved)))
 
         funded = await call("mock_shop_fund_compute", service_id=script, amount_minor=100)
         check("credit is bought for the script offer", funded.get("account", {}).get("balance_minor") == 100, str(funded.get("error") or ""))
@@ -344,25 +349,13 @@ async def worker(api_url: str, config_dir: Path, check: Checks) -> None:
                 break
             await asyncio.sleep(1)
         check("the worker stops by itself once sharing is off", worker_state() == "stopped", str(worker_state()))
+        listed = {service["id"] for service in (await call("mock_shop_list_services", kind="compute"))["services"]}
+        check("and withdraws its offers from the catalog", not {script, agent} & listed)
         before = (await call("mock_shop_get_compute_account", service_id=agent))["account"]["balance_minor"]
         orphan = await call("mock_shop_submit_agent_task", service_id=agent, task="Anyone there?")
-        if isinstance(orphan, dict) and orphan.get("run", {}).get("status") == "queued":
-            lost = (await call("mock_shop_wait_compute_run", run_id=orphan["run"]["id"], timeout_seconds=120))["run"]
-            unpaid = lost["status"] == "failed" and lost["charge_minor"] == 0
-        else:
-            unpaid = "offline" in str(orphan)
         after = (await call("mock_shop_get_compute_account", service_id=agent))["account"]["balance_minor"]
-        check("with the worker gone a job fails and nothing is charged", unpaid and after == before, f"{before} -> {after}")
-        gone = None
-        for _ in range(45):
-            gone = (await call("mock_shop_get_service", service_id=script))["service"]["worker_online"]
-            if gone is False:
-                break
-            await asyncio.sleep(1)
-        check("the offer drops out of the catalog as offline", gone is False)
-        ranked = await call("mock_shop_rank_services", service_ids=[script])
-        check("ranking eliminates the offline worker",
-              [reason["limit"] for item in ranked["decision"]["eliminated"] for reason in item["reasons"]] == ["worker_online"])
+        check("a job sent after that is refused, and the credit bought earlier is still readable and untouched",
+              "withdrawn" in str(orphan) and after == before, f"{str(orphan)[:80]}; {before} -> {after}")
 
     try:
         await seller.run(share)
@@ -375,6 +368,12 @@ async def worker(api_url: str, config_dir: Path, check: Checks) -> None:
             if worker_state() in (None, "stopped"):
                 break
             await asyncio.sleep(1)
+        # The worker kept its login for this throwaway marketplace in the real credential store.
+        import keyring
+        try:
+            keyring.delete_password("autark-worker", api_url)
+        except keyring.errors.KeyringError:
+            pass
 
 
 SCENARIOS = {"decision": decision, "payment": payment, "chain": chain, "worker": worker}

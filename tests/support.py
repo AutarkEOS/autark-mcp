@@ -10,7 +10,29 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import keyring  # noqa: E402
+from keyring.backend import KeyringBackend  # noqa: E402
+
 from client import MockShopApiError  # noqa: E402
+
+
+class MemoryKeyring(KeyringBackend):
+    """A credential store for tests, so no test reads or writes the real one."""
+
+    priority = 1
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.secrets: dict[tuple[str, str], str] = {}
+
+    def get_password(self, service: str, username: str) -> str | None:
+        return self.secrets.get((service, username))
+
+    def set_password(self, service: str, username: str, password: str) -> None:
+        self.secrets[(service, username)] = password
+
+    def delete_password(self, service: str, username: str) -> None:
+        self.secrets.pop((service, username), None)
 
 
 class FakeSession:
@@ -80,6 +102,10 @@ class ConfigDirectoryTestCase(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(restore)
         policy.reset_approvals()
         self.addCleanup(policy.reset_approvals)
+        previous_keyring = keyring.get_keyring()
+        self.keyring = MemoryKeyring()
+        keyring.set_keyring(self.keyring)
+        self.addCleanup(keyring.set_keyring, previous_keyring)
 
     def write_config(self, **fields: Any) -> None:
         self.config_file.write_text(json.dumps(fields), encoding="utf-8")

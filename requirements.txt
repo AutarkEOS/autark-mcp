@@ -1,2 +1,4 @@
+cryptography==50.0.2
 httpx==0.27.2
+keyring==25.6.0
 mcp==2.3.0

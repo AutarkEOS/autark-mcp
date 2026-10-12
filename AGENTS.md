@@ -26,6 +26,7 @@ Until October 2026 this code was the `mock-mcp/` directory of the Autark repo. I
 | `settings.py` | API base URL (loopback validation), env credentials, timeouts |
 | `x402_client.py` | x402 V2 client. Signing a payment is not implemented: it needs an agent-held Solana key |
 | `worker.py` | Background process that sells this machine's idle time: polls the marketplace for jobs, runs them, returns results |
+| `vault.py` | The worker's secrets in the system credential store, its payout key, and owner-only file permissions |
 | `tests/` | Unit tests with a scripted marketplace session; no stack, no payments |
 | `e2e/` | End-to-end scenarios against the real backend on a throwaway database |
 
@@ -41,7 +42,12 @@ Until October 2026 this code was the `mock-mcp/` directory of the Autark repo. I
 - **This process must never hold the marketplace's `SOLANA_ENCRYPTION_KEY`** or decrypt keys the marketplace stores.
 - **Sharing this machine needs a human's consent.** The model may set `sharing` on the first configuration and may later turn it off or narrow it. It may never turn it on, add a mode, or change `idle_after_seconds`. `worker.py` checks `sharing.enabled` itself before every poll; do not add a way around that check.
 - **A job is a stranger's input.** A script runs only in the Docker sandbox in `worker.run_script`; never add a fallback that runs it on the host. A task text is data for the agent command, which gets a minimal environment and none of this machine's secrets. The command itself comes only from `AUTARK_WORKER_AGENT_COMMAND`, never from the config file or a tool argument.
-- **The worker and the server are separate accounts.** The server is the buying agent; the worker is a vendor with its own login in `worker.json`. Do not let the worker use `MOCK_SHOP_USERNAME`/`MOCK_SHOP_PASSWORD`.
+- **The worker and the server are separate accounts.** The server is the buying agent; the worker is a vendor with its own login. Do not let the worker use `MOCK_SHOP_USERNAME`/`MOCK_SHOP_PASSWORD`.
+- **Worker secrets never go to a file.** Its password and payout key live only in the system credential store (`vault.py`); `worker.json` holds public details. Do not add a plaintext fallback, and never send the payout key anywhere: the marketplace gets only its address and a signature.
+
+## Machine-to-machine test
+
+When you act as the buyer or the seller in the two-machine test on production, follow [M2M-RUNBOOK.md](M2M-RUNBOOK.md): the steps, what to check in each response, and how to handle errors. [M2M-TEST.md](M2M-TEST.md) is the protocol for the humans.
 
 ## Commands
 
