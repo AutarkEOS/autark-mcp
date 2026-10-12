@@ -28,6 +28,15 @@ Agents playing one of the roles also follow [M2M-RUNBOOK.md](M2M-RUNBOOK.md): wh
 
 ## Part A: Seller
 
+**Quick start.** `seller.py` does A2 to A4 in one command: it creates `.venv`, writes the A3 consent on the first run, checks the credential store, sends a test prompt through the agent command the way the worker runs it, and starts the worker, which registers the vendor account and publishes the agent offer.
+
+```bash
+git clone https://github.com/AutarkEOS/autark-mcp.git ~/autark-mcp && cd ~/autark-mcp
+python3 seller.py --agent-command '["claude","-p","--tools","","--strict-mcp-config","--no-session-persistence","--model","haiku"]'
+```
+
+On Windows: `py -3 seller.py`. Without `--agent-command` it uses `AUTARK_WORKER_AGENT_COMMAND`, or the Claude Code command above when `claude` is installed. Pick the command as in A1. The script never turns sharing back on: if the config says `"enabled": false`, a human changes it. The steps below do the same by hand.
+
 Requirements:
 
 - Python 3.10+, git, and any command-line LLM agent.

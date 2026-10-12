@@ -26,6 +26,7 @@ Until October 2026 this code was the `mock-mcp/` directory of the Autark repo. I
 | `settings.py` | API base URL (loopback validation), env credentials, timeouts |
 | `x402_client.py` | x402 V2 client. Signing a payment is not implemented: it needs an agent-held Solana key |
 | `worker.py` | Background process that sells this machine's idle time: polls the marketplace for jobs, runs them, returns results |
+| `seller.py` | One command for a seller: venv, first-run consent, credential store and agent checks, then `worker.py` |
 | `vault.py` | The worker's secrets in the system credential store, its payout key, and owner-only file permissions |
 | `tests/` | Unit tests with a scripted marketplace session; no stack, no payments |
 | `e2e/` | End-to-end scenarios against the real backend on a throwaway database |

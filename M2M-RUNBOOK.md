@@ -106,6 +106,8 @@ The payout address is the buyer's `vendor_solana_pubkey`. `ceil(35.479 × 100) =
 | 8 | Task | leave that process running | `Job <run_id> (task), up to <N> s.` then `returned: billed <X> s, <Y> minor.` |
 | 9 | Cleanup | `"enabled": false`, then start `worker.py` again | `Withdrew offer <id>.` and `Sharing is not enabled in the agent config. Stopping.` |
 
+Steps 3 to 6 are one command: `python3 seller.py --agent-command '<command from step 1>'` (Windows: `py -3 seller.py`). It stops with a message when the credential store is missing, when the agent command does not answer its test prompt, or when sharing is off in the config; it never turns sharing back on.
+
 Notes on the steps:
 
 1. **Pick the command before starting the worker.** `AUTARK_WORKER_AGENT_COMMAND` is either a JSON list of strings or a plain command line. A JSON list is the safer form. Examples are in M2M-TEST A1 (Claude Code, Codex, Gemini CLI, Ollama, `llm`). For an agent that is not in that table, check how to turn its tools off; the worker will not do it. If the agent can read a key only from the environment, put that key in a script the worker runs (`chmod 700` on Linux and macOS) and pass the script path. The worker does not forward `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, or any other variable outside `AGENT_ENVIRONMENT`.
