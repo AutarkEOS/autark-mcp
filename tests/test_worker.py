@@ -208,6 +208,59 @@ class WorkerLoopTests(ConfigDirectoryTestCase):
         run_script.assert_awaited_once_with(b"print(2+2)", 7.5)
         self.assertEqual(self.session.made("POST", "/api/worker/runs/run-1/result")[0]["json_body"], result)
 
+    async def logged_task(self, result_response, output="Silicon dawn breaks"):
+        """Run one agent task through the loop and return what the worker logged."""
+        self.write_config(sharing={**SHARING, "modes": ["agent"]})
+        job = {"run_id": "run-1", "job_type": "task", "payload_base64": base64.b64encode(b"Write a haiku.").decode(),
+               "max_compute_seconds": "300"}
+        self.session.on("POST", "/api/worker/service-1/claim", (200, {"job": job}))
+        self.session.on("POST", "/api/worker/runs/run-1/result", result_response)
+        self.session.on("GET", "/api/wallet", {"wallet": {"solana_pubkey": "Payout111", "balance_minor": 30000, "solana_balance_sol": 0.03}})
+        result = {"output": output, "exit_code": 0, "timed_out": False, "output_truncated": False, "elapsed_compute_seconds": "35.479"}
+        messages = []
+        with patch.dict(os.environ, {"AUTARK_WORKER_AGENT_COMMAND": '["claude", "-p"]'}), \
+                patch.object(worker, "run_task", AsyncMock(return_value=result)), patch.object(worker, "log", messages.append):
+            await worker.Worker().run(once=True)
+        return "\n".join(messages)
+
+    async def test_a_task_is_logged_from_the_prompt_to_the_payment(self):
+        text = await self.logged_task({"run": {"status": "completed", "billed_seconds": "35.479", "charge_minor": 3548}, "replayed": False})
+        expected = ["Job run-1 (task), up to 300 s.", "Prompt from the buyer, untrusted (14 characters):\n    | Write a haiku.",
+                    "Running the agent command claude", "Finished in 35.479 s, exit code 0.",
+                    "Answer sent to the buyer (19 characters):\n    | Silicon dawn breaks", "Sending the result of run-1",
+                    "Job run-1 returned: billed 35.479 s, 3548 minor.", "Payment: 3548 minor (0.003548 SOL) taken from the buyer's prepaid credit",
+                    "This session: 1 paid job(s), 3548 minor (0.003548 SOL) billed.",
+                    "Payout address Payout111: 30000 minor in sales so far, 0.03 SOL on-chain.", "Waiting for the next job."]
+        positions = [text.find(line) for line in expected]
+        self.assertNotIn(-1, positions, text)
+        self.assertEqual(positions, sorted(positions))
+
+    async def test_a_rejected_result_is_logged_as_not_paid(self):
+        text = await self.logged_task(MockShopApiError(409, "This job is closed: it is no longer running."), output="")
+        self.assertIn("Result of run-1 was not accepted: This job is closed", text)
+        self.assertIn("Not paid: a result the marketplace does not accept is not charged to the buyer.", text)
+        self.assertIn("    | (empty)", text)
+        self.assertEqual(self.session.made("GET", "/api/wallet"), [])
+
+    async def test_each_new_funding_is_logged_once(self):
+        sales = [{"id": "sale-1", "kind": "sale", "amount_minor": 1000, "balance_after_minor": 1000}]
+        self.session.on("GET", "/api/wallet/transactions", lambda call: {"transactions": list(sales), "total": len(sales)})
+        self.session.on("GET", "/api/wallet", {"wallet": {"solana_pubkey": "Payout111", "balance_minor": 31000, "solana_balance_sol": 0.031}})
+        runner, messages = worker.Worker(), []
+        with patch.object(worker, "log", messages.append):
+            await runner.watch_sales()
+            sales.insert(0, {"id": "sale-2", "kind": "sale", "amount_minor": 30000, "balance_after_minor": 31000})
+            await runner.watch_sales()  # too soon: not checked again
+            runner.sales_checked_at = float("-inf")
+            await runner.watch_sales()
+            runner.sales_checked_at = float("-inf")
+            await runner.watch_sales()
+        self.assertEqual(messages[0], "Sales so far: 1 funding(s), 1000 minor.")
+        received = [message for message in messages if message.startswith("Payment received")]
+        self.assertEqual(received, ["Payment received: a buyer funded 30000 minor (0.03 SOL) of credit, sent on-chain to the payout "
+                                    "address. Sales total: 31000 minor."])
+        self.assertEqual(len(self.session.made("GET", "/api/wallet/transactions")), 3)
+
     async def test_without_docker_scripts_are_not_served(self):
         self.write_config(sharing=SHARING)
         with patch.object(worker, "docker_ready", AsyncMock(return_value=False)):
@@ -233,6 +286,34 @@ class WorkerLoopTests(ConfigDirectoryTestCase):
         self.session.on("POST", "/api/auth/register", MockShopApiError(None, "Could not connect to mock-service."))
         self.assertEqual(await worker.Worker().run(once=True), 0)
         self.assertEqual((self.status()["state"], self.status()["last_error"]), ("error", "Could not connect to mock-service."))
+
+
+class LogTests(ConfigDirectoryTestCase):
+    def logged(self, label, text, limit=2000):
+        messages = []
+        with patch.object(worker, "LOG_TEXT_CHARS", limit), patch.object(worker, "log", messages.append):
+            worker.log_text(label, text)
+        return messages
+
+    def test_a_strangers_text_cannot_drive_the_terminal(self):
+        [message] = self.logged("Prompt", "\x1b[2J\x1b]0;owned\x07hi\r\nthere\u202e\x08 \x1b")
+        self.assertEqual(message, "Prompt (27 characters):\n    | hi\n    | there ")
+
+    def test_long_text_is_cut_and_can_be_hidden(self):
+        [cut] = self.logged("Answer", "abcdefgh", limit=3)
+        self.assertEqual(cut, "Answer (8 characters):\n    | abc\n    | ... 5 more characters not shown")
+        [hidden] = self.logged("Answer", "secret plan", limit=0)
+        self.assertEqual(hidden, "Answer: 11 characters, not shown (AUTARK_WORKER_LOG_TEXT_CHARS=0).")
+
+    def test_a_console_without_utf8_still_gets_the_line(self):
+        stream = io.TextIOWrapper(io.BytesIO(), encoding="ascii")
+        with redirect_stdout(stream):
+            worker.log("Haiku: \u017curaw \u2603")
+        stream.seek(0)
+        self.assertTrue(stream.read().endswith("Haiku: ?uraw ?\n"))
+
+    def test_minor_units_read_as_sol(self):
+        self.assertEqual([worker.sol(3548), worker.sol(30000), worker.sol(0), worker.sol(None)], ["0.003548", "0.03", "0", "0"])
 
 
 class ExecutionTests(ConfigDirectoryTestCase):

@@ -174,12 +174,29 @@ Expected log:
 
 **Send the buyer the offer id** (`service-…`) and the payout address from this log.
 
-Leave the worker's terminal open. The worker quietly polls the marketplace every 3 s. When a job arrives, it prints:
+Leave the worker's terminal open. The worker quietly polls the marketplace every 3 s and checks for new fundings every 15 s. When a buyer funds credit, and when a job arrives, it prints:
 
 ```
+... Ready: agent offer service-<id> at 100 minor/s, paid to <Solana address>. Waiting for jobs.
+... Sales so far: 0 funding(s), 0 minor.
+... Payment received: a buyer funded 30000 minor (0.03 SOL) of credit, sent on-chain to the payout address. Sales total: 30000 minor.
+... Payout address <Solana address>: 30000 minor in sales so far, 0.03 SOL on-chain.
 ... Job <run_id> (task), up to <N> s.
+... Prompt from the buyer, untrusted (<n> characters):
+    | <the buyer's prompt>
+... Running the agent command <program>.
+... Finished in <X> s, exit code 0.
+... Answer sent to the buyer (<n> characters):
+    | <the agent's answer>
+... Sending the result of <run_id> to the marketplace.
 ... Job <run_id> returned: billed <X> s, <Y> minor.
+... Payment: <Y> minor (<Y/1000000> SOL) taken from the buyer's prepaid credit. That SOL reached the payout address when the buyer funded the credit; no new transfer is made per job.
+... This session: 1 paid job(s), <Y> minor (<Y/1000000> SOL) billed.
+... Payout address <Solana address>: 30000 minor in sales so far, <balance> SOL on-chain.
+... Waiting for the next job.
 ```
+
+The prompt and the answer are shown without terminal escape sequences or control characters, up to 2000 characters each. `AUTARK_WORKER_LOG_TEXT_CHARS` changes that limit; `0` logs only their length.
 
 The vendor account password and the payout key are only in the credential store. `worker.json`, next to `agent-config.json`, holds only the account name, the payout address and the offer ids; only the owner can read the file. Later starts use the same account and the same offer.
 
