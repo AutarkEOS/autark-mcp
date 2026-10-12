@@ -17,6 +17,7 @@ from mcp_types import ToolAnnotations
 from pydantic import BaseModel, ConfigDict, Field
 
 import policy
+import vault
 from agent_config import (
     AgentConfigError,
     append_audit,
@@ -342,7 +343,7 @@ def _worker_status() -> dict[str, Any] | None:
         return None
     if not isinstance(status, dict) or time.time() - status.get("updated_at", 0) > 20 or status.get("state") == "stopped":
         return None
-    return {key: status.get(key) for key in ("state", "offers", "unavailable", "busy_with", "last_error")}
+    return {key: status.get(key) for key in ("state", "offers", "payout_address", "unavailable", "busy_with", "last_error")}
 
 
 def _start_worker() -> None:
@@ -352,6 +353,10 @@ def _start_worker() -> None:
     command = [sys.executable, "-E", str(Path(__file__).resolve().with_name("worker.py"))]
     state_path("worker.log").parent.mkdir(parents=True, exist_ok=True)
     with open(state_path("worker.log"), "ab") as log:
+        try:
+            vault.restrict_to_owner(state_path("worker.log"))
+        except (OSError, subprocess.SubprocessError):
+            pass
         common: dict[str, Any] = {"stdin": subprocess.DEVNULL, "stdout": log, "stderr": log, "env": environment, "close_fds": True,
                                   "cwd": str(Path(__file__).resolve().parent)}
         if os.name != "nt":
