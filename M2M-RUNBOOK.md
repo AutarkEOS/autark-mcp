@@ -113,14 +113,14 @@ Notes on the steps:
    - Linux / macOS, with the command substituted for the example:
 
 ```bash
-echo "Odpowiedz jednym słowem: OK" | env -i PATH="$PATH" HOME="$HOME" USER="$USER" LANG="${LANG:-C.UTF-8}" \
+echo "Answer with one word: OK" | env -i PATH="$PATH" HOME="$HOME" USER="$USER" LANG="${LANG:-C.UTF-8}" \
   claude -p --tools "" --strict-mcp-config --no-session-persistence --model haiku
 ```
 
    - Windows (PowerShell) has no `env -i`, so this does not catch a command that works only because a key is in the environment:
 
 ```powershell
-"Odpowiedz jednym słowem: OK" | claude -p --tools '""' --strict-mcp-config --no-session-persistence --model haiku
+"Answer with one word: OK" | claude -p --tools '""' --strict-mcp-config --no-session-persistence --model haiku
 ```
 
 3. **Install into the venv the worker will use.** Linux / macOS: `python3 -m venv .venv` and `.venv/bin/pip install -r requirements.txt`. Windows: `py -3 -m venv .venv` and `.\.venv\Scripts\pip install -r requirements.txt`. Start the worker with `python -E` so it does not import packages from outside that venv.
