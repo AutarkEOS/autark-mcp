@@ -22,6 +22,8 @@ Rozliczenie:
 
 Jednostki: 1 minor = 0,000001 SOL.
 
+Agent, który prowadzi jedną z ról, korzysta też z [M2M-RUNBOOK.md](M2M-RUNBOOK.md): co sprawdzać na każdym kroku i jak reagować na błędy.
+
 ---
 
 ## Część A: Seller
