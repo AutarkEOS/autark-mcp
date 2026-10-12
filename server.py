@@ -44,7 +44,7 @@ mcp = MCPServer(
         "Tools for the Autark mock marketplace (AutarkEOS/Autark). "
         "Browse services and vendors, then act as an agent: wallet, cart, purchases, "
         "one-time API usages, and prepaid compute. "
-        "Prices are integer minor units (1 minor = 0.01 SOL in this demo). "
+        "Prices are integer minor units of SOL: 1 minor = 0.000001 SOL (1,000 lamports), so 1,000,000 minor = 1 SOL. "
         "Writes that take idempotency_key are safe to retry with the same key and the same body. "
         "A new key is a new payment. Seeded demo agents have no Solana keys, so purchases and "
         "compute funding fail until you register a new agent and fund Devnet. "
@@ -121,7 +121,7 @@ class LineItem(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    product_id: str = Field(..., description="Offer id, e.g. `orange` or `vendor-b-apple`.", pattern=_ID)
+    product_id: str = Field(..., description="Offer id, e.g. `meridian-sol-usd` or `lattice-dex-swaps-30d`.", pattern=_ID)
     quantity: int = Field(..., description="Units, 1-999. Duplicate ids are summed by the API.", ge=1, le=999)
     vendor_id: str | None = Field(
         default=None,
@@ -476,7 +476,8 @@ async def mock_shop_configure_agent(
 @mcp.tool(name="mock_shop_rank_services", title="Rank services", annotations=READ)
 async def mock_shop_rank_services(
     kind: Literal["product", "api-usage", "compute"] | None = Field(default=None, description="Rank only this offer kind."),
-    product_type: str | None = Field(default=None, description="Rank offers of one type, e.g. `apple`. This is how you compare substitutes.", pattern=_ID),
+    capability: str | None = Field(default=None, description="Rank offers that provide one capability, e.g. `sol-usd-price`, `current-weather` or `python-sandbox`. This is how you compare substitutes.", pattern=_ID),
+    product_type: str | None = Field(default=None, description="Rank offers of one product_type. API and compute offers share a generic type, so prefer `capability`.", pattern=_ID),
     vendor_id: str | None = Field(default=None, description="Rank only this vendor's offers.", pattern=_ID),
     service_ids: list[str] | None = Field(default=None, description="Rank exactly these offer ids, 1-50.", min_length=1, max_length=50),
     quantity: int = Field(default=1, description="Units you intend to buy; used for the estimated total and the per-transaction limit.", ge=1, le=999),
@@ -505,8 +506,8 @@ async def mock_shop_rank_services(
     except AgentConfigError as error:
         return f"Error: {error}"
     body = {name: value for name, value in (
-        ("kind", kind), ("product_type", product_type), ("vendor_id", vendor_id), ("service_ids", service_ids),
-        ("quantity", quantity), ("top_n", top_n), ("seed", seed), ("preferences", merged)) if value is not None}
+        ("kind", kind), ("capability", capability), ("product_type", product_type), ("vendor_id", vendor_id),
+        ("service_ids", service_ids), ("quantity", quantity), ("top_n", top_n), ("seed", seed), ("preferences", merged)) if value is not None}
     try:
         _status, payload = await session().request("POST", "/api/services/rank", json_body=body)
     except Exception as error:  # noqa: BLE001
@@ -543,20 +544,23 @@ async def mock_shop_list_services(
     ),
     vendor_id: str | None = Field(default=None, description="Filter by vendor id, e.g. `vendor-a`.", pattern=_ID),
     product_type: str | None = Field(
-        default=None, description="Filter by product type, e.g. `orange`, `apple`, `api-usage`, `compute`.", pattern=_ID
+        default=None, description="Filter by product type, e.g. `dataset-license`, `api-usage`, `compute`.", pattern=_ID
+    ),
+    capability: str | None = Field(
+        default=None, description="Filter by capability, e.g. `sol-usd-price`, `geocoding`, `python-sandbox`.", pattern=_ID
     ),
 ) -> str:
-    """List catalog offers. Prices are minor units. Public API/compute offers omit private url and response_field. Use metrics, not the archival top-level quality columns."""
+    """List catalog offers. Prices are minor units (1 minor = 0.000001 SOL). Each offer has a `capability` and a server-computed `fulfillment` (live-upstream with its source, demo-computed, sandbox, worker for another agent's idle machine, file-storage, record-only or not-executable). Public API/compute offers omit private url and response_field. Use metrics, not the archival top-level quality columns."""
     return await _public(
         "GET",
         "/api/services",
-        params={"kind": kind, "vendor_id": vendor_id, "product_type": product_type},
+        params={"kind": kind, "vendor_id": vendor_id, "product_type": product_type, "capability": capability},
     )
 
 
 @mcp.tool(name="mock_shop_get_service", title="Get service", annotations=READ)
 async def mock_shop_get_service(
-    service_id: str = Field(..., description="Offer id, e.g. `orange` or `vendor-a-thailand-weather`.", pattern=_ID),
+    service_id: str = Field(..., description="Offer id, e.g. `meridian-sol-usd` or `northwind-weather-current`.", pattern=_ID),
 ) -> str:
     """Read one offer plus its purchase_stats. 404 if the id does not exist."""
     return await _public("GET", f"/api/services/{_path(service_id)}")
@@ -763,7 +767,7 @@ async def mock_shop_purchase(
         max_length=128,
     ),
 ) -> str:
-    """Buy offers directly. This spends Devnet SOL (1 minor = 0.01 SOL plus gas) and then records SQL. Seeded demo agents have no keys and fail with 400. Keep the returned idempotency_key if the response is lost. Refused without spending when the total breaks the agent config's spending limits."""
+    """Buy offers directly. This spends Devnet SOL (1 minor = 0.000001 SOL, plus the network fee) and then records SQL. Seeded demo agents have no keys and fail with 400. Keep the returned idempotency_key if the response is lost. Refused without spending when the total breaks the agent config's spending limits."""
     lines = _lines(items)
     body: dict[str, Any] = {"items": lines}
     if _last_ranking_seed is not None:
@@ -882,7 +886,7 @@ async def mock_shop_list_compute_accounts() -> str:
 
 @mcp.tool(name="mock_shop_get_compute_account", title="Get compute account", annotations=READ)
 async def mock_shop_get_compute_account(
-    service_id: str = Field(..., description="Compute offer id, e.g. `vendor-a-python-compute`.", pattern=_ID),
+    service_id: str = Field(..., description="Compute offer id, e.g. `helios-python-sandbox`.", pattern=_ID),
 ) -> str:
     """Read one compute budget, including a virtual zero balance if it was never funded."""
     return await _authed("GET", f"/api/compute/{_path(service_id)}/account")
@@ -893,7 +897,7 @@ async def mock_shop_fund_compute(
     service_id: str = Field(..., description="Compute offer id.", pattern=_ID),
     amount_minor: int = Field(
         ...,
-        description="Credit to buy. 1000 minor transfers 10 SOL. Debt is repaid before extra credit is added.",
+        description="Credit to buy in minor units. 1,000,000 minor transfers 1 SOL; at 2 minor per second, 120 minor buys 60 s. Debt is repaid before extra credit is added.",
         ge=1,
         le=2_147_483_647,
     ),
@@ -1069,7 +1073,7 @@ async def mock_shop_fetch_x402(
     1. Issues the request; if 200 returns the body directly.
     2. On 402, parses the PAYMENT-REQUIRED header (x402 V2 base64 JSON).
     3. Selects the first requirement the agent can pay: exact scheme, Solana Devnet, within the spending limit.
-    4. Signs a Solana SOL transfer (1 minor = 0.01 SOL) and retries with PAYMENT-SIGNATURE.
+    4. Signs a Solana SOL transfer (1 minor = 0.000001 SOL) and retries with PAYMENT-SIGNATURE.
     5. Returns the response body together with payment metadata.
 
     The spending policy (allowed_kinds, per-transaction limit, daily budget) is checked before signing.

@@ -1,0 +1,186 @@
+{
+  "vendors": [
+    {
+      "id": "vendor-a",
+      "name": "Vendor A"
+    },
+    {
+      "id": "vendor-b",
+      "name": "Vendor B"
+    },
+    {
+      "id": "vendor-c",
+      "name": "Vendor C"
+    },
+    {
+      "id": "vendor-d",
+      "name": "Vendor D"
+    }
+  ],
+  "services": [
+    {
+      "id": "orange",
+      "vendor_id": "vendor-a",
+      "product_type": "orange",
+      "name": "Orange",
+      "price_minor": 250,
+      "currency": "SOL"
+    },
+    {
+      "id": "vendor-b-apple",
+      "vendor_id": "vendor-b",
+      "product_type": "apple",
+      "name": "Apple",
+      "price_minor": 220,
+      "currency": "SOL"
+    },
+    {
+      "id": "vendor-b-banana",
+      "vendor_id": "vendor-b",
+      "product_type": "banana",
+      "name": "Banana",
+      "price_minor": 390,
+      "currency": "SOL"
+    },
+    {
+      "id": "vendor-c-apple",
+      "vendor_id": "vendor-c",
+      "product_type": "apple",
+      "name": "Apple",
+      "price_minor": 280,
+      "currency": "SOL"
+    },
+    {
+      "id": "vendor-c-banana",
+      "vendor_id": "vendor-c",
+      "product_type": "banana",
+      "name": "Banana",
+      "price_minor": 320,
+      "currency": "SOL"
+    },
+    {
+      "id": "vendor-d-apple",
+      "vendor_id": "vendor-d",
+      "product_type": "apple",
+      "name": "Apple",
+      "price_minor": 240,
+      "currency": "SOL"
+    },
+    {
+      "id": "vendor-d-banana",
+      "vendor_id": "vendor-d",
+      "product_type": "banana",
+      "name": "Banana",
+      "price_minor": 360,
+      "currency": "SOL"
+    },
+    {
+      "vendor_id": "vendor-a",
+      "kind": "api-usage",
+      "product_type": "api-usage",
+      "price_minor": 5,
+      "currency": "SOL",
+      "response_schema": {
+        "type": "number"
+      },
+      "id": "vendor-a-thailand-weather",
+      "name": "Thailand weather",
+      "description": "Returns a temperature in Celsius for Thailand. Demo provider returns a fixed 31 Celsius; this is not live weather data.",
+      "url": "mock-vendor-api:/api/thailand-weather",
+      "schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "response_field": "temperature"
+    },
+    {
+      "vendor_id": "vendor-a",
+      "kind": "api-usage",
+      "product_type": "api-usage",
+      "price_minor": 5,
+      "currency": "SOL",
+      "response_schema": {
+        "type": "number"
+      },
+      "id": "vendor-a-random-number",
+      "name": "Random number",
+      "description": "Returns a random integer between min and max, inclusive. Pass two integers with min <= max.",
+      "url": "mock-vendor-api:/api/random-number",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "min": {
+            "type": "integer",
+            "minimum": -2147483648,
+            "maximum": 2147483647,
+            "description": "Lower bound, inclusive."
+          },
+          "max": {
+            "type": "integer",
+            "minimum": -2147483648,
+            "maximum": 2147483647,
+            "description": "Upper bound, inclusive."
+          }
+        },
+        "required": [
+          "min",
+          "max"
+        ],
+        "additionalProperties": false
+      },
+      "response_field": "number"
+    },
+    {
+      "id": "vendor-a-python-compute",
+      "vendor_id": "vendor-a",
+      "kind": "compute",
+      "product_type": "compute",
+      "name": "compute your .py file",
+      "description": "Upload a Python file and receive its printed output. Prepay compute credit at 1 SOL per second (Solana Devnet demo scale); actual wall time is rounded up to 0.01 SOL. A run stops when the credit or the 60-second limit runs out and returns the output printed so far.",
+      "price_minor": 100,
+      "currency": "SOL",
+      "url": "mock-vendor-api:/api/compute"
+    },
+    {
+      "vendor_id": "vendor-b",
+      "kind": "api-usage",
+      "product_type": "api-usage",
+      "price_minor": 3,
+      "currency": "SOL",
+      "response_schema": {
+        "type": "number"
+      },
+      "id": "vendor-b-thailand-weather",
+      "name": "Thailand weather (budget)",
+      "description": "Returns a temperature in Celsius for Thailand. Cheaper than Vendor A but uses a slower provider endpoint (~500 ms median response time). Good for non-latency-sensitive agents. Demo provider returns a fixed 31 Celsius.",
+      "url": "mock-vendor-api:/api/thailand-weather-v2",
+      "schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "response_field": "temperature"
+    },
+    {
+      "vendor_id": "vendor-a",
+      "kind": "api-usage",
+      "product_type": "api-usage",
+      "price_minor": 5,
+      "currency": "SOL",
+      "response_schema": {
+        "type": "number"
+      },
+      "id": "vendor-a-thailand-weather-v2",
+      "name": "Thailand weather (fast)",
+      "description": "Returns a temperature in Celsius for Thailand. Faster provider than the budget tier. Use this offer when latency matters. Demo provider returns a fixed 31 Celsius.",
+      "url": "mock-vendor-api:/api/thailand-weather",
+      "schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "response_field": "temperature"
+    }
+  ]
+}

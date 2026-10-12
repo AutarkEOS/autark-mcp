@@ -81,7 +81,7 @@ The agent is configured once and then follows that config: which offers it prefe
 ```json
 {
   "version": 1,
-  "purpose": "Buy fruit for a kitchen, cheapest reliable supplier",
+  "purpose": "Buy SOL/USD price data from the cheapest reliable provider",
   "purchase_mode": "ask",
   "spending": {
     "max_per_transaction_minor": 500,
@@ -236,8 +236,8 @@ The tests use a scripted marketplace session and a temporary config directory. T
 ```
 
 - `decision`: first-run config, ranking under two profiles, measured signals, policy rejections. Nothing is bought.
-- `payment`: register, rank, buy, retry, budget and checkout blocks, a retry after a server restart, a direct REST purchase blocked by the marketplace, and the ERC-8004 feedback export. Uses the backend's `AUTARK_DB_TESTS` payment path: no airdrop. The SQL mirror is set and the chain is replaced at the payment boundary. A newly registered agent starts with 1000 minor (10.00 SOL) of that mirror. Balance, ledger and receipts are real.
+- `payment`: register, rank, buy, retry, budget and checkout blocks, a retry after a server restart, a direct REST purchase blocked by the marketplace, and the ERC-8004 feedback export. Uses the backend's `AUTARK_DB_TESTS` payment path: no airdrop. The SQL mirror is set and the chain is replaced at the payment boundary. A newly registered agent starts with 1000 minor (0.001 SOL; 1 minor = 0.000001 SOL) of that mirror. The scenarios seed their own frozen catalog, `e2e/catalog.json`, so they do not depend on the demo catalog. Balance, ledger and receipts are real.
 - `worker` (`--scenario worker`): one machine consents to sharing through the config tool, its worker starts and publishes two offers, and another agent rents it for a script and a written task. Checks the charge against the marketplace clock, the credit cap, and that nothing is charged once the worker is gone. Needs Docker. The agent answering the task is a stand-in script, not an LLM.
-- `chain` (`--scenario chain`): one real Solana Devnet purchase of 0.05 SOL. It needs real Devnet SOL on the agent address it prints and prints the faucet link (https://faucet.solana.com). It does not call a top-up. When the faucet refuses, fund that address and rerun with `--database <name> --keep-database`.
+- `chain` (`--scenario chain`): one real Solana Devnet purchase of 5 minor (0.000005 SOL) plus the network fee. It needs real Devnet SOL on the agent address it prints and prints the faucet link (https://faucet.solana.com). It does not call a top-up. When the faucet refuses, fund that address and rerun with `--database <name> --keep-database`.
 
 The database is dropped afterwards unless `--keep-database` is given.
