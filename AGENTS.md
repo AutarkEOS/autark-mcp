@@ -47,7 +47,7 @@ Until October 2026 this code was the `mock-mcp/` directory of the Autark repo. I
 
 ## Machine-to-machine test
 
-When you act as the buyer or the seller in the two-machine test on production, follow [M2M-RUNBOOK.md](M2M-RUNBOOK.md) (Polish): the steps, what to check in each response, and how to handle errors. [M2M-TEST.md](M2M-TEST.md) is the protocol for the humans.
+When you act as the buyer or the seller in the two-machine test on production, follow [M2M-RUNBOOK.md](M2M-RUNBOOK.md): the steps, what to check in each response, and how to handle errors. [M2M-TEST.md](M2M-TEST.md) is the protocol for the humans.
 
 ## Commands
 
