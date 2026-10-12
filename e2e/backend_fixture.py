@@ -3,8 +3,8 @@
 Started by run.py with the backend's own interpreter (<Autark>/mock-servivce/backend/.venv).
 Usage: backend_fixture.py --database NAME --port PORT [--mode test-payments|chain]
 
-A new database gets the schema, every migration, the demo catalog and a little
-history: six agents rating vendor-c-apple 5/5, six rating vendor-b-apple 2/5, and ten
+A new database gets the schema, every migration, the frozen e2e catalog (catalog.json,
+independent of the demo catalog in databse/seeds) and a little history: six agents rating vendor-c-apple 5/5, six rating vendor-b-apple 2/5, and ten
 weather API calls (nine succeeded, ~180 ms). An existing database is reused as is.
 Prints READY when the server accepts requests.
 """
@@ -12,6 +12,7 @@ import argparse
 import json
 import os
 import sys
+from pathlib import Path
 from unittest.mock import patch
 from uuid import uuid4
 
@@ -81,7 +82,7 @@ def create_database():
         connection.execute((ROOT / 'databse/init/001-schema.sql').read_text(encoding='utf-8'))
         for file in sorted((ROOT / 'databse/migrations').glob('*.sql')):
             connection.execute(file.read_text(encoding='utf-8'))
-        connection.execute(seed_sql(load_seed('databse/seeds/products.json')))
+        connection.execute(seed_sql(load_seed(Path(__file__).with_name('catalog.json'))))
         for index in range(6):
             for product_id, rating in (('vendor-c-apple', 5), ('vendor-b-apple', 2)):
                 user = uuid4()
@@ -116,7 +117,7 @@ def install_test_payments():
                                      'WHERE u.solana_pubkey=%s', (pubkey,)).fetchone()
         if row is None:
             return None, None, 'unavailable'
-        return row['balance_minor'], row['balance_minor'] / 100, 'chain'
+        return row['balance_minor'], row['balance_minor'] / 1_000_000, 'chain'
 
     def prepare_transfers(encrypted_key, transfers):
         needed = sum(amount for _, amount in transfers)
@@ -125,8 +126,8 @@ def install_test_payments():
                                      'WHERE u.solana_privkey_encrypted=%s', (encrypted_key,)).fetchone()
         balance = row['balance_minor'] if row else 0
         if needed > balance:
-            raise ApiError(f'Insufficient Solana Devnet balance: this payment needs {needed / 100:.2f} SOL, '
-                           f'the mirrored wallet has {balance / 100:.2f} SOL. Nothing was sent.', 409)
+            raise ApiError(f'Insufficient Solana Devnet balance: this payment needs {needed / 1_000_000:.6f} SOL, '
+                           f'the mirrored wallet has {balance / 1_000_000:.6f} SOL. Nothing was sent.', 409)
         return {'signed_transaction': b'e2e-test-payment', 'solana_tx_signature': 'e2e' + new_id().hex,
                 'last_valid_block_height': 1, 'wallet_balance_after_minor': balance - needed}
 

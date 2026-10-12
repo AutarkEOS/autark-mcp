@@ -125,7 +125,7 @@ async def _sign_solana_payment(
 
     Returns the payload dict ready to be base64-encoded into PAYMENT-SIGNATURE.
 
-    The payment is a SOL transfer (lamports = amount * 10_000_000 where 1 minor = 0.01 SOL)
+    The payment is a SOL transfer (lamports = amount * 1_000 where 1 minor = 0.000001 SOL)
     to the ``payTo`` address in the requirement.  For USDC requirements a separate
     SPL-token transfer would be needed; that is not implemented here.
     """
@@ -145,7 +145,7 @@ async def _sign_solana_payment(
     if not pay_to:
         raise X402Error("Requirement is missing payTo address.")
 
-    amount_lamports = int(requirement["amount"]) * 10_000_000  # minor → lamports
+    amount_lamports = int(requirement["amount"]) * 1_000  # minor → lamports
 
     rpc_url = os.environ.get("SOLANA_RPC_URL", "https://api.devnet.solana.com")
     async with AsyncClient(rpc_url, timeout=10) as client:

@@ -142,7 +142,7 @@ async def payment(api_url: str, config_dir: Path, check: Checks) -> None:
         registered = await call("mock_shop_register", username=username, password=password)
         check("agent registered with a Solana keypair", isinstance(registered, dict) and registered["http_status"] == 201)
         wallet = await call("mock_shop_get_wallet")
-        check("test payment path starts with 10.00 SOL mirrored, no airdrop",
+        check("test payment path starts with 1000 minor (0.001 SOL) mirrored, no airdrop",
               wallet["wallet"]["balance_minor"] == 1000 and wallet["wallet"]["currency"] == "SOL",
               str(wallet["wallet"].get("balance_minor")))
 
@@ -220,7 +220,7 @@ async def payment(api_url: str, config_dir: Path, check: Checks) -> None:
 
 
 async def chain(api_url: str, config_dir: Path, check: Checks) -> None:
-    """One real Solana Devnet purchase (0.05 SOL + fee). Needs Devnet SOL on the agent address."""
+    """One real Solana Devnet purchase (5 minor = 0.000005 SOL + fee). Needs Devnet SOL on the agent address."""
     username, password = "e2e-chain-payer", "e2e-password-2026"
 
     async def steps(call):
