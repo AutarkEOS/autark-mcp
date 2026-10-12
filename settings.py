@@ -9,6 +9,8 @@ DEFAULT_API_URL = "http://127.0.0.1:500"
 DEFAULT_TIMEOUT_SECONDS = 30.0
 FUNDING_TIMEOUT_SECONDS = 65.0
 COMPUTE_RUN_TIMEOUT_SECONDS = 90.0
+# A file-input API call (OCR, transcription, image analysis) waits on a model upstream; the marketplace gives up after 45 s.
+API_FILE_TIMEOUT_SECONDS = 75.0
 
 
 class ConfigError(ValueError):
