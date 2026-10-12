@@ -45,6 +45,10 @@ Until October 2026 this code was the `mock-mcp/` directory of the Autark repo. I
 - **The worker and the server are separate accounts.** The server is the buying agent; the worker is a vendor with its own login. Do not let the worker use `MOCK_SHOP_USERNAME`/`MOCK_SHOP_PASSWORD`.
 - **Worker secrets never go to a file.** Its password and payout key live only in the system credential store (`vault.py`); `worker.json` holds public details. Do not add a plaintext fallback, and never send the payout key anywhere: the marketplace gets only its address and a signature.
 
+## Machine-to-machine test
+
+When you act as the buyer or the seller in the two-machine test on production, follow [M2M-RUNBOOK.md](M2M-RUNBOOK.md): the steps, what to check in each response, and how to handle errors. [M2M-TEST.md](M2M-TEST.md) is the protocol for the humans.
+
 ## Commands
 
 Windows (PowerShell):
